@@ -26,8 +26,8 @@ import (
 
 // Store 原始包文件仓库。
 type Store struct {
-	dir string           // 原始文件目录
-	db  storage.Storage  // 索引存储
+	dir string          // 原始文件目录
+	db  storage.Storage // 索引存储
 }
 
 // New 创建 Store。
@@ -39,6 +39,9 @@ func New(dir string, db storage.Storage) (*Store, error) {
 	}
 	return &Store{dir: dir, db: db}, nil
 }
+
+// Dir 返回原始文件目录。
+func (s *Store) Dir() string { return s.dir }
 
 // SaveCapture 保存一个已解析的 capture。
 //
