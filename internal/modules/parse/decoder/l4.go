@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"flow-monitoring/internal/kernel/datamodel"
+	"flow-monitoring/internal/modules/parse/decoder/l7"
 )
 
 // tcp 解析 TCP 头（对应 PacketLens tcp() index.html:2525）。
@@ -92,9 +93,9 @@ func tcp(c *ctx, off, end int) {
 	}
 	c.info(info)
 
-	// L7 分发（后续由 decoder/l7 实现；P0 暂留空，仅标记 payload 存在）
+	// L7 分发（TCP 内容嗅探优先）
 	if pl > 0 {
-		// TODO(P2): dispatch(c, off+dataOffset, end, sp, dp, "tcp")
+		l7.Dispatch(p)
 	}
 }
 
@@ -130,9 +131,9 @@ func udp(c *ctx, off, end int) {
 	c.proto("UDP")
 	c.info(fmt.Sprintf("%d → %d Len=%d", sp, dp, pl))
 
-	// L7 分发（后续补充）
+	// L7 分发（UDP 端口优先）
 	if pl > 0 {
-		// TODO(P2): dispatch(c, off+8, payloadEnd, sp, dp, "udp")
+		l7.Dispatch(p)
 	}
 }
 

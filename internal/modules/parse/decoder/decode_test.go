@@ -68,7 +68,7 @@ func newPacket(data []byte) *datamodel.Packet {
 
 // TestDecode_EthernetIPv4TCP 端到端 TCP 解码。
 func TestDecode_EthernetIPv4TCP(t *testing.T) {
-	payload := []byte("GET / HTTP/1.1\r\n")
+	payload := []byte{0x01, 0x02, 0x03, 0x04} // 非 L7 数据，保持 TCP 判定
 	frame := ethFrame(0x0800, ipv4Packet(6,
 		net.ParseIP("192.168.1.100"),
 		net.ParseIP("192.168.1.1"),
@@ -110,7 +110,7 @@ func TestDecode_EthernetIPv4UDP(t *testing.T) {
 	frame := ethFrame(0x0800, ipv4Packet(17,
 		net.ParseIP("10.0.0.1"),
 		net.ParseIP("10.0.0.2"),
-		udpSegment(53, 5353, payload),
+		udpSegment(1000, 2000, payload), // 非 L7 端口，保持 UDP 判定
 	))
 
 	p := newPacket(frame)
@@ -119,8 +119,8 @@ func TestDecode_EthernetIPv4UDP(t *testing.T) {
 	if p.Proto != "UDP" {
 		t.Errorf("Proto = %q, want UDP", p.Proto)
 	}
-	if p.SrcPort != 53 || p.DstPort != 5353 {
-		t.Errorf("port = %d -> %d, want 53 -> 5353", p.SrcPort, p.DstPort)
+	if p.SrcPort != 1000 || p.DstPort != 2000 {
+		t.Errorf("port = %d -> %d, want 1000 -> 2000", p.SrcPort, p.DstPort)
 	}
 	if p.PayloadLen != len(payload) {
 		t.Errorf("PayloadLen = %d, want %d", p.PayloadLen, len(payload))
