@@ -1,6 +1,6 @@
 # 流量分析平台开发环境 - PostgreSQL 16
 # 用法：docker compose -f scripts/docker-compose.yml up -d
-# 连接串：postgres://flow:flow@127.0.0.1:5432/flow?sslmode=disable
+# 连接串：postgres://flow:flow@127.0.0.1:5433/flow?sslmode=disable
 services:
   postgres:
     image: postgres:16-alpine
@@ -11,7 +11,8 @@ services:
       POSTGRES_PASSWORD: flow
       POSTGRES_DB: flow
     ports:
-      - "5432:5432"
+      # 宿主机 5432 可能被 WSL/本机 PG 占用，映射到 5433 避免冲突
+      - "5433:5432"
     volumes:
       - flow_pg_data:/var/lib/postgresql/data
     healthcheck:
