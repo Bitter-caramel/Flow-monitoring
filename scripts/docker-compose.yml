@@ -1,0 +1,24 @@
+# 流量分析平台开发环境 - PostgreSQL 16
+# 用法：docker compose -f scripts/docker-compose.yml up -d
+# 连接串：postgres://flow:flow@127.0.0.1:5432/flow?sslmode=disable
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: flow-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: flow
+      POSTGRES_PASSWORD: flow
+      POSTGRES_DB: flow
+    ports:
+      - "5432:5432"
+    volumes:
+      - flow_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flow -d flow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  flow_pg_data:
