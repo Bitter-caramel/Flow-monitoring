@@ -52,8 +52,9 @@ func (s *Store) Dir() string { return s.dir }
 //  4. 包元数据写入 storage.PacketStore（若 db 非 nil）
 //
 // packets 由调用方（importer）在解析+解码后转换为 storage.PacketRecord。
+// linkType 为该 capture 的链路类型（pcapng 全局 LINKTYPE）。
 // 返回 CaptureRecord（含文件路径与 sha256）。
-func (s *Store) SaveCapture(ctx context.Context, id, name string, raw []byte, packets []storage.PacketRecord) (*storage.CaptureRecord, error) {
+func (s *Store) SaveCapture(ctx context.Context, id, name string, linkType int, raw []byte, packets []storage.PacketRecord) (*storage.CaptureRecord, error) {
 	// 1. 存文件
 	path, sha, err := s.saveFile(id, raw)
 	if err != nil {
@@ -64,6 +65,7 @@ func (s *Store) SaveCapture(ctx context.Context, id, name string, raw []byte, pa
 		ID:          id,
 		Name:        name,
 		Format:      "pcapng",
+		LinkType:    linkType,
 		PacketCount: len(packets),
 		ByteSize:    int64(len(raw)),
 		FilePath:    path,

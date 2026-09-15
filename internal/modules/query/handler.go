@@ -37,6 +37,9 @@ func (s *Service) Handler() http.Handler {
 // handleListCaptures GET /api/v1/captures
 func (s *Service) handleListCaptures(w http.ResponseWriter, r *http.Request) {
 	page := parsePage(r)
+	if page.Limit <= 0 {
+		page.Limit = 50
+	}
 	res, err := s.ListCaptures(r.Context(), page)
 	if err != nil {
 		writeError(w, err)
@@ -65,6 +68,9 @@ func (s *Service) handleGetCapture(w http.ResponseWriter, r *http.Request) {
 func (s *Service) handleListPackets(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	page := parsePage(r)
+	if page.Limit <= 0 {
+		page.Limit = 100
+	}
 	res, err := s.ListPackets(r.Context(), id, page)
 	if err != nil {
 		writeError(w, err)

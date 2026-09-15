@@ -62,7 +62,7 @@ func (i *Importer) Import(ctx context.Context, id, name string, data []byte) (*s
 	}
 
 	// 4. 落库
-	rec, err := i.store.SaveCapture(ctx, id, name, data, packets)
+	rec, err := i.store.SaveCapture(ctx, id, name, cap.LinkType, data, packets)
 	if err != nil {
 		return nil, fmt.Errorf("importer: save capture: %w", err)
 	}
