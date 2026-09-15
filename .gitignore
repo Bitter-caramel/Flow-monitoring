@@ -11,7 +11,7 @@ dist/
 vendor/
 
 # Build cache
-go.sum
+# go.sum 必须提交（Go 依赖锁定），不要忽略
 
 # IDE / Editor
 .vscode/
