@@ -1,17 +1,15 @@
-// Package registry 是模块登记本。
+// Package registry 是插件登记本。
 //
-// 注意与 contract 包的区别（容易混淆）：
-//   - contract 包：管"接口契约"——某个 API 的版本、能力、实现指针
-//   - registry 包：管"模块本身"——模块元数据、依赖关系、启动函数
+// 设计依据（参考 DSH / Cordis）：
+//   - 每个功能模块都是一个 plugin.Plugin，在 init() 中自注册到 Default
+//   - bootstrap 只读注册表，按拓扑序装配（Mount → Start）
+//   - 插件只依赖服务名（plugin.Context.Get），不依赖具体实现
 //
-// 一个模块 X 在 init() 中可能同时做两件事：
-//  1. 把自己注册到 registry.Default（声明 ID/依赖/启动函数）
-//  2. 把它实现的契约注册到 contract.Default（如 contract.Default.Register(&Contract{ID:"foo.api", ...})）
+// 与 contract 包的区别：
+//   - registry：管"插件本身"——插件身份、依赖关系、装配顺序
+//   - contract：管"接口契约"——某个 API 的版本、能力、实现指针
 //
-// bootstrap 启动时按 registry.TopologicalSort() 的顺序调用每个模块的 StartFn。
-//
-// 设计依据 v3 流程梯队 1.4 + v0.3 文件结构第 3.1 节：
-//   - 模块能登记，能看出谁依赖谁
-//   - 能发现循环依赖（启动期拒绝启动）
-//   - 启动时只读（运行期不允许新增模块，避免热加载失控）
+// 可替换性：
+//   - Register：同 ID 冲突报错（保护内置插件）
+//   - Replace：强制覆盖（用户用同名插件替换内置实现）
 package registry

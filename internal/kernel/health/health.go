@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"flow-monitoring/internal/kernel/lifecycle"
+	"flow-monitoring/internal/kernel/plugin"
 	"flow-monitoring/internal/kernel/registry"
 )
 
@@ -85,27 +86,28 @@ func (h *Health) Report() Report {
 		Modules: []ModuleHealth{},
 	}
 
-	var states map[registry.ModuleID]lifecycle.State
+	var states map[string]lifecycle.State
 	if h.lc != nil {
 		states = h.lc.States()
 	}
 
-	// 若无模块注册，直接返回 ok（空平台）
+	// 若无插件注册，直接返回 ok（空平台）
 	if h.reg == nil {
 		return rep
 	}
 
 	overall := StatusOK
-	for _, m := range h.reg.List() {
+	for _, p := range h.reg.List() {
+		mf := p.Manifest()
 		mh := ModuleHealth{
-			ID:      string(m.ID),
-			State:   lifecycle.StateCreated.String(), // 默认未启动
+			ID:      mf.ID,
+			State:   lifecycle.StateCreated.String(), // 默认未装配
 			Healthy: true,
 		}
 
 		// 1. 生命周期状态
 		if states != nil {
-			if st, ok := states[m.ID]; ok {
+			if st, ok := states[mf.ID]; ok {
 				mh.State = st.String()
 				if st == lifecycle.StateError {
 					mh.Healthy = false
@@ -117,9 +119,9 @@ func (h *Health) Report() Report {
 			}
 		}
 
-		// 2. 自定义探针
-		if m.HealthFn != nil {
-			hs := m.HealthFn()
+		// 2. 自定义探针（插件可选实现 HealthChecker）
+		if hc, ok := p.(plugin.HealthChecker); ok {
+			hs := hc.Health()
 			if !hs.Healthy {
 				mh.Healthy = false
 				if hs.Message != "" {

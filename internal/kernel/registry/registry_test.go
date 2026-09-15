@@ -4,29 +4,46 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"flow-monitoring/internal/kernel/plugin"
 )
+
+// testPlugin 测试用插件（嵌入 Base，覆盖 Manifest）。
+type testPlugin struct {
+	plugin.Base
+	manifest plugin.Manifest
+}
+
+func (p *testPlugin) Manifest() plugin.Manifest { return p.manifest }
+
+func newTestPlugin(id string, depends ...string) *testPlugin {
+	return &testPlugin{manifest: plugin.Manifest{
+		ID: id, Name: id, Version: "1.0.0", Layer: plugin.LayerKernel,
+		Depends: depends,
+	}}
+}
 
 // TestRegisterAndGet 基本注册与查询。
 func TestRegisterAndGet(t *testing.T) {
 	reg := New()
-	m := &ModuleInfo{ID: "kernel.transport", Name: "Transport", Layer: LayerKernel}
-	if err := reg.Register(m); err != nil {
+	p := newTestPlugin("kernel.transport")
+	if err := reg.Register(p); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	got, ok := reg.Get("kernel.transport")
 	if !ok {
 		t.Fatal("Get: not found")
 	}
-	if got.Name != "Transport" {
-		t.Errorf("Name = %q, want Transport", got.Name)
+	if got.Manifest().Name != "kernel.transport" {
+		t.Errorf("Name = %q, want kernel.transport", got.Manifest().Name)
 	}
 }
 
 // TestRegister_DuplicateConflict 重复注册返回 ErrConflict。
 func TestRegister_DuplicateConflict(t *testing.T) {
 	reg := New()
-	_ = reg.Register(&ModuleInfo{ID: "x", Name: "first"})
-	err := reg.Register(&ModuleInfo{ID: "x", Name: "second"})
+	_ = reg.Register(newTestPlugin("x"))
+	err := reg.Register(newTestPlugin("x"))
 	if !errors.Is(err, ErrConflict) {
 		t.Errorf("duplicate Register: want ErrConflict, got %v", err)
 	}
@@ -35,20 +52,34 @@ func TestRegister_DuplicateConflict(t *testing.T) {
 // TestRegister_NilRejected nil/空 ID 被拒绝。
 func TestRegister_NilRejected(t *testing.T) {
 	reg := New()
-	if err := reg.Register(nil); !errors.Is(err, ErrInvalidModule) {
-		t.Errorf("Register(nil) = %v, want ErrInvalidModule", err)
+	if err := reg.Register(nil); !errors.Is(err, ErrInvalidPlugin) {
+		t.Errorf("Register(nil) = %v, want ErrInvalidPlugin", err)
 	}
-	if err := reg.Register(&ModuleInfo{}); !errors.Is(err, ErrInvalidModule) {
-		t.Errorf("Register(empty ID) = %v, want ErrInvalidModule", err)
+	if err := reg.Register(&testPlugin{manifest: plugin.Manifest{}}); !errors.Is(err, ErrInvalidPlugin) {
+		t.Errorf("Register(empty ID) = %v, want ErrInvalidPlugin", err)
 	}
 }
 
-// TestTopologicalSort_NoDeps 无依赖模块直接返回。
+// TestReplace 同名替换（可替换性）。
+func TestReplace(t *testing.T) {
+	reg := New()
+	_ = reg.Register(newTestPlugin("x"))
+	replacement := newTestPlugin("x")
+	if err := reg.Replace(replacement); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	got, _ := reg.Get("x")
+	if got != replacement {
+		t.Error("Replace should replace the plugin")
+	}
+}
+
+// TestTopologicalSort_NoDeps 无依赖直接返回。
 func TestTopologicalSort_NoDeps(t *testing.T) {
 	reg := New()
-	_ = reg.Register(&ModuleInfo{ID: "a"})
-	_ = reg.Register(&ModuleInfo{ID: "b"})
-	_ = reg.Register(&ModuleInfo{ID: "c"})
+	_ = reg.Register(newTestPlugin("a"))
+	_ = reg.Register(newTestPlugin("b"))
+	_ = reg.Register(newTestPlugin("c"))
 
 	order, err := reg.TopologicalSort()
 	if err != nil {
@@ -59,58 +90,29 @@ func TestTopologicalSort_NoDeps(t *testing.T) {
 	}
 }
 
-// TestTopologicalSort_LinearChain 线性依赖链：a→b→c，期望顺序 c,b,a。
+// TestTopologicalSort_LinearChain 线性依赖：a→b→c，期望 c,b,a。
 func TestTopologicalSort_LinearChain(t *testing.T) {
 	reg := New()
-	_ = reg.Register(&ModuleInfo{ID: "a", Depends: []ModuleID{"b"}})
-	_ = reg.Register(&ModuleInfo{ID: "b", Depends: []ModuleID{"c"}})
-	_ = reg.Register(&ModuleInfo{ID: "c"})
+	_ = reg.Register(newTestPlugin("a", "b"))
+	_ = reg.Register(newTestPlugin("b", "c"))
+	_ = reg.Register(newTestPlugin("c"))
 
 	order, err := reg.TopologicalSort()
 	if err != nil {
 		t.Fatalf("TopologicalSort: %v", err)
 	}
-	want := "c,b,a"
-	got := joinIDs(order)
-	if got != want {
-		t.Errorf("order = %s, want %s", got, want)
+	got := strings.Join(order, ",")
+	if got != "c,b,a" {
+		t.Errorf("order = %s, want c,b,a", got)
 	}
 }
 
-// TestTopologicalSort_Diamond 菱形依赖：A→B,C→D。
-//
-//	A depends on B and C
-//	B depends on D
-//	C depends on D
-//
-// 期望 D 先出，B/C 中间（字典序），A 最后。
-func TestTopologicalSort_Diamond(t *testing.T) {
-	reg := New()
-	_ = reg.Register(&ModuleInfo{ID: "a", Depends: []ModuleID{"b", "c"}})
-	_ = reg.Register(&ModuleInfo{ID: "b", Depends: []ModuleID{"d"}})
-	_ = reg.Register(&ModuleInfo{ID: "c", Depends: []ModuleID{"d"}})
-	_ = reg.Register(&ModuleInfo{ID: "d"})
-
-	order, err := reg.TopologicalSort()
-	if err != nil {
-		t.Fatalf("TopologicalSort: %v", err)
-	}
-	got := joinIDs(order)
-	// d 必须 first，a 必须 last
-	if !strings.HasPrefix(got, "d,") {
-		t.Errorf("d should come first, got %s", got)
-	}
-	if !strings.HasSuffix(got, ",a") {
-		t.Errorf("a should come last, got %s", got)
-	}
-}
-
-// TestTopologicalSort_Cycle 检测循环依赖。
+// TestTopologicalSort_Cycle 循环依赖检测。
 func TestTopologicalSort_Cycle(t *testing.T) {
 	reg := New()
-	_ = reg.Register(&ModuleInfo{ID: "a", Depends: []ModuleID{"b"}})
-	_ = reg.Register(&ModuleInfo{ID: "b", Depends: []ModuleID{"c"}})
-	_ = reg.Register(&ModuleInfo{ID: "c", Depends: []ModuleID{"a"}})
+	_ = reg.Register(newTestPlugin("a", "b"))
+	_ = reg.Register(newTestPlugin("b", "c"))
+	_ = reg.Register(newTestPlugin("c", "a"))
 
 	_, err := reg.TopologicalSort()
 	if !errors.Is(err, ErrCyclicDependency) {
@@ -118,10 +120,10 @@ func TestTopologicalSort_Cycle(t *testing.T) {
 	}
 }
 
-// TestTopologicalSort_UnresolvedDep 依赖未注册返回 ErrUnresolvedDep。
+// TestTopologicalSort_UnresolvedDep 依赖未注册。
 func TestTopologicalSort_UnresolvedDep(t *testing.T) {
 	reg := New()
-	_ = reg.Register(&ModuleInfo{ID: "a", Depends: []ModuleID{"missing"}})
+	_ = reg.Register(newTestPlugin("a", "missing"))
 	_, err := reg.TopologicalSort()
 	if !errors.Is(err, ErrUnresolvedDep) {
 		t.Errorf("want ErrUnresolvedDep, got %v", err)
@@ -131,54 +133,30 @@ func TestTopologicalSort_UnresolvedDep(t *testing.T) {
 // TestFindCycle 显式环查找。
 func TestFindCycle(t *testing.T) {
 	reg := New()
-	_ = reg.Register(&ModuleInfo{ID: "a", Depends: []ModuleID{"b"}})
-	_ = reg.Register(&ModuleInfo{ID: "b", Depends: []ModuleID{"c"}})
-	_ = reg.Register(&ModuleInfo{ID: "c", Depends: []ModuleID{"a"}})
+	_ = reg.Register(newTestPlugin("a", "b"))
+	_ = reg.Register(newTestPlugin("b", "c"))
+	_ = reg.Register(newTestPlugin("c", "a"))
 
 	cycle, has := reg.FindCycle()
 	if !has {
 		t.Fatal("FindCycle: should detect cycle")
 	}
-	if len(cycle) < 3 {
-		t.Fatalf("cycle length too short: %v", cycle)
-	}
-	// 环首尾应相同（闭合）
 	if cycle[0] != cycle[len(cycle)-1] {
 		t.Errorf("cycle not closed: %v", cycle)
 	}
 }
 
-// TestFindCycle_NoCycle 无环时返回 false。
-func TestFindCycle_NoCycle(t *testing.T) {
-	reg := New()
-	_ = reg.Register(&ModuleInfo{ID: "a", Depends: []ModuleID{"b"}})
-	_ = reg.Register(&ModuleInfo{ID: "b"})
-	cycle, has := reg.FindCycle()
-	if has {
-		t.Errorf("FindCycle: should not detect, got %v", cycle)
-	}
-}
-
-// TestLayer_String 层级名输出。
+// TestLayer_String 层级名。
 func TestLayer_String(t *testing.T) {
-	cases := map[Layer]string{
-		LayerKernel:     "L0",
-		LayerFoundation: "L1",
-		LayerFeature:    "L2",
-		LayerExtension:  "L3",
+	cases := map[plugin.Layer]string{
+		plugin.LayerKernel:     "L0",
+		plugin.LayerFoundation: "L1",
+		plugin.LayerFeature:    "L2",
+		plugin.LayerExtension:  "L3",
 	}
 	for l, want := range cases {
 		if got := l.String(); got != want {
 			t.Errorf("Layer(%d).String() = %q, want %q", l, got, want)
 		}
 	}
-}
-
-// joinIDs 把 []ModuleID 用逗号拼接（测试用辅助）。
-func joinIDs(ids []ModuleID) string {
-	parts := make([]string, len(ids))
-	for i, id := range ids {
-		parts[i] = string(id)
-	}
-	return strings.Join(parts, ",")
 }

@@ -74,7 +74,7 @@ func TestSaveCapture(t *testing.T) {
 		{No: 2, Proto: "UDP", Time: time.Now()},
 	}
 
-	rec, err := s.SaveCapture(context.Background(), "cap-1", "test", raw, pkts)
+	rec, err := s.SaveCapture(context.Background(), "cap-1", "test", 1, raw, pkts)
 	if err != nil {
 		t.Fatalf("SaveCapture: %v", err)
 	}

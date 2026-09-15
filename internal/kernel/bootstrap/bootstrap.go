@@ -2,8 +2,6 @@ package bootstrap
 
 import (
 	"context"
-	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,47 +12,49 @@ import (
 	"flow-monitoring/internal/kernel/health"
 	"flow-monitoring/internal/kernel/lifecycle"
 	"flow-monitoring/internal/kernel/logging"
+	"flow-monitoring/internal/kernel/plugin"
 	"flow-monitoring/internal/kernel/registry"
 	"flow-monitoring/internal/kernel/storage"
 	"flow-monitoring/internal/kernel/transport"
 	"flow-monitoring/internal/modules/importer"
 	"flow-monitoring/internal/modules/packetstore"
 	"flow-monitoring/internal/modules/query"
-	"flow-monitoring/internal/modules/store"
+
+	// 匿名 import 触发各模块插件的 init() 自注册到 registry.Default
+	_ "flow-monitoring/internal/modules/store"
 )
 
-// App 应用实例，持有所有内核组件的引用。
+// App 应用实例。
 //
-// 业务模块通过 App 暴露的字段获取共享组件（如 App.EventBus / App.Transport）。
+// 插件装配完成后，服务字段从 plugin.Context 填充（依赖注入的结果）。
 type App struct {
 	Cfg       *config.Config
 	Logger    *logging.Logger
 	LogFile   *os.File
+	Context   *plugin.Context
 	Registry  *registry.Registry
 	Lifecycle *lifecycle.Coordinator
 	EventBus  *eventbus.Bus
-	Transport *transport.Server
-	Health    *health.Health
 
-	// 存储与查询链路（DB 连接失败时为 nil，服务降级运行）
+	// 服务（StartAll 后从 Context 获取，可能为 nil=降级）
+	Transport   *transport.Server
+	Health      *health.Health
 	Storage     storage.Storage
 	PacketStore *packetstore.Store
 	Importer    *importer.Importer
 	Query       *query.Service
 }
 
-// Bootstrap 创建 App 并装配所有内核组件。
+// Bootstrap 创建 App 并装配内核基础设施。
 //
-// 参数 cfg 与 logger 由调用方提供（便于测试注入）；生产入口由 Run 统一创建。
+// 流程：
+//  1. 创建 plugin.Context，预置 config/logger/eventbus
+//  2. 使用 registry.Default（各插件已在 init() 中自注册）
+//  3. 创建 lifecycle（registry + Context）
+//  4. 预置 registry/lifecycle 到 Context（health 插件依赖）
 //
-// 装配流程：
-//  1. 创建 registry（空）、lifecycle、eventbus
-//  2. 创建 transport.Server（尚未监听）
-//  3. 创建 health.Health（绑定 registry + lifecycle）
-//  4. 注册 /healthz 路由到 transport
-//  5. 注册内核模块（transport / health）到 registry
-//
-// 返回的 App 尚未启动；调用 App.Start 后各模块才真正运行。
+// 注意：不直接创建任何业务模块 —— 模块由各自的插件在 init() 中自注册，
+// StartAll 时按拓扑序 Mount（依赖注入）→ Start。
 func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*App, error) {
 	if cfg == nil {
 		cfg = config.Default()
@@ -63,97 +63,62 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 		logger = logging.New(logging.LevelInfo, "json", os.Stdout)
 	}
 
-	app := &App{
-		Cfg:      cfg,
-		Logger:   logger,
-		LogFile:  logFile,
-		Registry: registry.New(),
-		EventBus: eventbus.New(),
-	}
-	app.Lifecycle = lifecycle.New(app.Registry)
+	// 1. 依赖注入容器 + 基础服务
+	ctx := plugin.NewContext(context.Background())
+	ctx.Provide(plugin.ServiceConfig, cfg)
+	ctx.Provide(plugin.ServiceLogger, logger)
 
-	// transport 未启动前即可注册路由
-	app.Transport = transport.New(cfg.Server.HTTPAddr, logger)
-	if app.Transport == nil {
-		return nil, fmt.Errorf("bootstrap: create transport failed (nil logger)")
-	}
+	bus := eventbus.New()
+	ctx.Provide(plugin.ServiceEventBus, bus)
 
-	app.Health = health.New(app.Registry, app.Lifecycle)
-	app.Transport.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		app.Health.Handler().ServeHTTP(w, r)
-	})
+	// 2. 注册表（插件已自注册）+ 生命周期
+	reg := registry.Default
+	lc := lifecycle.New(reg, ctx)
+	ctx.Provide(plugin.ServiceRegistry, reg)
+	ctx.Provide(plugin.ServiceLifecycle, lc)
 
-	// 装配业务模块（存储/导入/查询），DB 不可用时降级
-	app.wireBusiness()
-
-	// 注册内核模块
-	if err := app.registerKernelModules(); err != nil {
-		return nil, err
-	}
-
-	return app, nil
+	return &App{
+		Cfg:       cfg,
+		Logger:    logger,
+		LogFile:   logFile,
+		Context:   ctx,
+		Registry:  reg,
+		Lifecycle: lc,
+		EventBus:  bus,
+	}, nil
 }
 
-// wireBusiness 装配存储/导入/查询业务模块。
-//
-// 连接 PostgreSQL 失败时不中断启动（记录警告，服务降级为仅健康检查可用）。
-// 这符合 v0.3 第 7 章"能力探针优雅降级"——存储不可用时平台仍能启动。
-func (a *App) wireBusiness() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// 1. 连接 PostgreSQL
-	pg, err := store.New(ctx, a.Cfg.Database.DSN, a.Cfg.Database.MaxConns)
-	if err != nil {
-		a.Logger.Warn("postgres unavailable, storage disabled", "err", err)
-		return
-	}
-	if err := pg.Migrate(ctx); err != nil {
-		a.Logger.Warn("postgres migrate failed", "err", err)
-		pg.Close()
-		return
-	}
-	a.Storage = pg
-
-	// 2. 原始文件仓库
-	ps, err := packetstore.New(a.Cfg.DataDir, pg)
-	if err != nil {
-		a.Logger.Warn("packetstore init failed", "err", err)
-		pg.Close()
-		return
-	}
-	a.PacketStore = ps
-
-	// 3. 导入器与查询服务
-	a.Importer = importer.New(ps)
-	a.Query = query.New(pg)
-
-	// 4. 注册路由
-	// 上传接口（精确方法匹配）
-	a.Transport.HandleFunc("POST /api/v1/captures/import", a.Importer.ImportHandler())
-	// 查询接口（前缀挂载到 query 的 mux，内部精确匹配）
-	qHandler := a.Query.Handler()
-	a.Transport.Mux().Handle("/api/v1/captures", qHandler)
-	a.Transport.Mux().Handle("/api/v1/captures/", qHandler)
-
-	a.Logger.Info("business modules wired", "data_dir", a.Cfg.DataDir)
-}
-
-// Start 启动所有已注册模块（按拓扑序）。
-//
-// 等价于 app.Lifecycle.StartAll(ctx)。
+// Start 按拓扑序装配所有插件（Mount → Start），并填充服务字段。
 func (a *App) Start(ctx context.Context) error {
+	// 装配前做拓扑校验（循环依赖在启动期暴露）
+	order, err := a.Registry.TopologicalSort()
+	if err != nil {
+		a.Logger.Error("plugin topology invalid", "err", err)
+		return err
+	}
+	a.Logger.Info("plugin assembly order", "plugins", order, "count", len(order))
+
 	if err := a.Lifecycle.StartAll(ctx); err != nil {
 		a.Logger.Error("bootstrap start failed", "err", err)
 		return err
 	}
-	a.Logger.Info("bootstrap ready", "modules", len(a.Lifecycle.StartedOrder()))
+
+	a.fillServices()
+	a.Logger.Info("bootstrap ready", "plugins", len(a.Lifecycle.StartedOrder()))
 	return nil
 }
 
-// Wait 阻塞等待退出信号（SIGINT/SIGTERM）或 ctx 取消，随后优雅关闭。
-//
-// 退出信号通过 signal.NotifyContext 捕获。
+// fillServices 从 Context 读取各服务（依赖注入结果）。
+func (a *App) fillServices() {
+	a.Transport = plugin.GetTyped[*transport.Server](a.Context, plugin.ServiceTransport)
+	a.Health = plugin.GetTyped[*health.Health](a.Context, plugin.ServiceHealth)
+	a.Storage = plugin.GetTyped[storage.Storage](a.Context, plugin.ServiceStorage)
+	a.PacketStore = plugin.GetTyped[*packetstore.Store](a.Context, plugin.ServicePacketStore)
+	a.Importer = plugin.GetTyped[*importer.Importer](a.Context, plugin.ServiceImporter)
+	a.Query = plugin.GetTyped[*query.Service](a.Context, plugin.ServiceQuery)
+}
+
+// Wait 阻塞等待退出信号，随后优雅关闭。
 func (a *App) Wait(ctx context.Context) error {
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -166,27 +131,19 @@ func (a *App) Wait(ctx context.Context) error {
 	return a.Shutdown(shutdownCtx)
 }
 
-// Shutdown 优雅关闭：逆序停模块 → 关闭事件总线 → 关闭日志文件。
+// Shutdown 优雅关闭：逆序停插件 → 关事件总线 → 关日志文件。
 func (a *App) Shutdown(ctx context.Context) error {
 	a.Logger.Info("bootstrap shutting down")
 
-	// 1. 逆序停止模块（transport 在 StopFn 中 Shutdown）
+	// 1. 逆序停止插件（transport 在 Stop 中 Shutdown，store 在 Stop 中 Close）
 	if err := a.Lifecycle.StopAll(ctx); err != nil {
-		a.Logger.Error("stop modules failed", "err", err)
-		// 继续执行后续清理，不中断
+		a.Logger.Error("stop plugins failed", "err", err)
 	}
 
 	// 2. 关闭事件总线
 	a.EventBus.Close()
 
-	// 3. 关闭存储连接
-	if a.Storage != nil {
-		if err := a.Storage.Close(); err != nil {
-			a.Logger.Error("close storage failed", "err", err)
-		}
-	}
-
-	// 4. 关闭日志文件
+	// 3. 关闭日志文件
 	if a.LogFile != nil {
 		if err := a.LogFile.Close(); err != nil {
 			a.Logger.Error("close log file failed", "err", err)
@@ -197,72 +154,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// registerKernelModules 注册内核模块到 registry。
-//
-// 注册的模块：
-//   - kernel.transport：HTTP/WS 接待窗口（StartFn 启动监听，StopFn 优雅关闭）
-//   - kernel.health：体检报告（仅 HealthFn，无 Start/Stop）
-//
-// 各模块受 config.Modules 开关控制：未启用则不注册。
-func (a *App) registerKernelModules() error {
-	if a.Cfg.IsModuleEnabled("transport") {
-		err := a.Registry.Register(&registry.ModuleInfo{
-			ID:          "kernel.transport",
-			Name:        "Transport",
-			Description: "HTTP/WebSocket 对外接待窗口",
-			Layer:       registry.LayerKernel,
-			StartFn: func() error {
-				go func() {
-					if err := a.Transport.Start(); err != nil {
-						a.Logger.Error("transport start failed", "err", err)
-					}
-				}()
-				return nil
-			},
-			StopFn: func() error {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				return a.Transport.Shutdown(ctx)
-			},
-			HealthFn: func() registry.HealthStatus {
-				if a.Transport.IsStarted() {
-					return registry.HealthStatus{Healthy: true}
-				}
-				return registry.HealthStatus{Healthy: false, Message: "transport not started"}
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("bootstrap: register transport: %w", err)
-		}
-	}
-
-	if a.Cfg.IsModuleEnabled("health") {
-		err := a.Registry.Register(&registry.ModuleInfo{
-			ID:          "kernel.health",
-			Name:        "Health",
-			Description: "体检报告聚合器",
-			Layer:       registry.LayerKernel,
-			HealthFn: func() registry.HealthStatus {
-				return registry.HealthStatus{Healthy: true}
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("bootstrap: register health: %w", err)
-		}
-	}
-
-	return nil
-}
-
 // Run 全流程便捷入口：读配置 → 建日志 → Bootstrap → Start → Wait。
-//
-// 供 cmd/server 调用：
-//
-//	func main() {
-//	    if err := bootstrap.Run(""); err != nil {
-//	        os.Exit(1)
-//	    }
-//	}
 func Run(cfgPath string) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
