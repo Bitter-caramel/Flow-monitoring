@@ -15,7 +15,12 @@ import (
 	"flow-monitoring/internal/kernel/lifecycle"
 	"flow-monitoring/internal/kernel/logging"
 	"flow-monitoring/internal/kernel/registry"
+	"flow-monitoring/internal/kernel/storage"
 	"flow-monitoring/internal/kernel/transport"
+	"flow-monitoring/internal/modules/importer"
+	"flow-monitoring/internal/modules/packetstore"
+	"flow-monitoring/internal/modules/query"
+	"flow-monitoring/internal/modules/store"
 )
 
 // App 应用实例，持有所有内核组件的引用。
@@ -30,6 +35,12 @@ type App struct {
 	EventBus  *eventbus.Bus
 	Transport *transport.Server
 	Health    *health.Health
+
+	// 存储与查询链路（DB 连接失败时为 nil，服务降级运行）
+	Storage     storage.Storage
+	PacketStore *packetstore.Store
+	Importer    *importer.Importer
+	Query       *query.Service
 }
 
 // Bootstrap 创建 App 并装配所有内核组件。
@@ -72,12 +83,60 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 		app.Health.Handler().ServeHTTP(w, r)
 	})
 
+	// 装配业务模块（存储/导入/查询），DB 不可用时降级
+	app.wireBusiness()
+
 	// 注册内核模块
 	if err := app.registerKernelModules(); err != nil {
 		return nil, err
 	}
 
 	return app, nil
+}
+
+// wireBusiness 装配存储/导入/查询业务模块。
+//
+// 连接 PostgreSQL 失败时不中断启动（记录警告，服务降级为仅健康检查可用）。
+// 这符合 v0.3 第 7 章"能力探针优雅降级"——存储不可用时平台仍能启动。
+func (a *App) wireBusiness() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 1. 连接 PostgreSQL
+	pg, err := store.New(ctx, a.Cfg.Database.DSN, a.Cfg.Database.MaxConns)
+	if err != nil {
+		a.Logger.Warn("postgres unavailable, storage disabled", "err", err)
+		return
+	}
+	if err := pg.Migrate(ctx); err != nil {
+		a.Logger.Warn("postgres migrate failed", "err", err)
+		pg.Close()
+		return
+	}
+	a.Storage = pg
+
+	// 2. 原始文件仓库
+	ps, err := packetstore.New(a.Cfg.DataDir, pg)
+	if err != nil {
+		a.Logger.Warn("packetstore init failed", "err", err)
+		pg.Close()
+		return
+	}
+	a.PacketStore = ps
+
+	// 3. 导入器与查询服务
+	a.Importer = importer.New(ps)
+	a.Query = query.New(pg)
+
+	// 4. 注册路由
+	// 上传接口（精确方法匹配）
+	a.Transport.HandleFunc("POST /api/v1/captures/import", a.Importer.ImportHandler())
+	// 查询接口（前缀挂载到 query 的 mux，内部精确匹配）
+	qHandler := a.Query.Handler()
+	a.Transport.Mux().Handle("/api/v1/captures", qHandler)
+	a.Transport.Mux().Handle("/api/v1/captures/", qHandler)
+
+	a.Logger.Info("business modules wired", "data_dir", a.Cfg.DataDir)
 }
 
 // Start 启动所有已注册模块（按拓扑序）。
@@ -120,7 +179,14 @@ func (a *App) Shutdown(ctx context.Context) error {
 	// 2. 关闭事件总线
 	a.EventBus.Close()
 
-	// 3. 关闭日志文件
+	// 3. 关闭存储连接
+	if a.Storage != nil {
+		if err := a.Storage.Close(); err != nil {
+			a.Logger.Error("close storage failed", "err", err)
+		}
+	}
+
+	// 4. 关闭日志文件
 	if a.LogFile != nil {
 		if err := a.LogFile.Close(); err != nil {
 			a.Logger.Error("close log file failed", "err", err)

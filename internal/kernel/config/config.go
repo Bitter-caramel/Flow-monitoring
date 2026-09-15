@@ -24,6 +24,7 @@ type Config struct {
 	Server   ServerConfig        `json:"server"`
 	Database DBConfig           `json:"database"`
 	Logging  LogConfig          `json:"logging"`
+	DataDir  string             `json:"data_dir"` // 原始抓包文件目录
 	Modules  map[string]bool    `json:"modules"`
 	Extra    map[string]any      `json:"extra,omitempty"` // 模块自定义配置
 }
@@ -82,6 +83,7 @@ func Default() *Config {
 			MaxSize:  100,
 			MaxFiles: 7,
 		},
+		DataDir: "data",
 		Modules: map[string]bool{
 			"transport": true,
 			"health":    true,
