@@ -116,7 +116,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.logger.Info("transport shutting down")
-	return s.server.Shutdown(ctx)
+	err := s.server.Shutdown(ctx)
+
+	// 标记已停止（幂等关闭后 IsStarted 返回 false）
+	s.mu.Lock()
+	s.started = false
+	s.mu.Unlock()
+
+	return err
 }
 
 // IsStarted 是否已 Start。
