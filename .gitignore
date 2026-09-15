@@ -13,6 +13,11 @@ vendor/
 # Build cache
 # go.sum 必须提交（Go 依赖锁定），不要忽略
 
+# Node / Frontend
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
 # IDE / Editor
 .vscode/
 .idea/
