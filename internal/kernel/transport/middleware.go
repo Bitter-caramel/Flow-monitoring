@@ -27,6 +27,9 @@ func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 }
 
 // accessLogMiddleware 记录每个请求的访问日志（方法/路径/状态码/耗时）。
+//
+// request_id 从响应头读取：requestIDMiddleware 位于本中间件内层，
+// 它写入的 X-Request-ID 在本中间件读 request context 时尚未注入。
 func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -38,7 +41,7 @@ func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 			"status", rw.status,
 			"duration_ms", time.Since(start).Milliseconds(),
 			"remote", r.RemoteAddr,
-			"request_id", RequestIDFrom(r.Context()),
+			"request_id", rw.Header().Get("X-Request-ID"),
 		)
 	})
 }

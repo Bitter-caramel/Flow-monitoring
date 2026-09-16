@@ -1,0 +1,9 @@
+{
+  "id": "modules.export",
+  "name": "报告导出",
+  "version": "0.1.0",
+  "layer": "L2",
+  "binary": "export",
+  "http_base": "/api/v1/reports",
+  "provides": ["export.api"]
+}

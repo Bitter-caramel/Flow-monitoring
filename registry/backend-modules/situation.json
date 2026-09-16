@@ -1,0 +1,9 @@
+{
+  "id": "modules.situation",
+  "name": "态势评估引擎",
+  "version": "0.1.0",
+  "layer": "L2",
+  "binary": "situation",
+  "provides": ["situation.level"],
+  "injects": ["detect.feature"]
+}

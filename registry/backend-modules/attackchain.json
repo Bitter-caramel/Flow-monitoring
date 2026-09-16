@@ -1,0 +1,9 @@
+{
+  "id": "modules.attackchain",
+  "name": "攻击链收集",
+  "version": "0.1.0",
+  "layer": "L2",
+  "binary": "attackchain",
+  "provides": ["attackchain.chain"],
+  "injects": ["detect.feature", "situation.level"]
+}

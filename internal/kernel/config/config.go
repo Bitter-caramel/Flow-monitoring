@@ -21,12 +21,15 @@ import (
 
 // Config 平台主配置。
 type Config struct {
-	Server   ServerConfig        `json:"server"`
-	Database DBConfig           `json:"database"`
-	Logging  LogConfig          `json:"logging"`
-	DataDir  string             `json:"data_dir"` // 原始抓包文件目录
-	Modules  map[string]bool    `json:"modules"`
-	Extra    map[string]any      `json:"extra,omitempty"` // 模块自定义配置
+	Server     ServerConfig  `json:"server"`
+	Database   DBConfig      `json:"database"`
+	Logging    LogConfig     `json:"logging"`
+	DataDir    string        `json:"data_dir"`    // 原始抓包文件目录
+	PluginDir  string        `json:"plugin_dir"`  // 模块进程二进制目录
+	ManifestDir string       `json:"manifest_dir"` // 用户扩展模块清单目录（L3）
+	StaticDir  string        `json:"static_dir"`  // 前端构建产物目录（空=不托管）
+	Modules    map[string]bool `json:"modules"`
+	Extra      map[string]any `json:"extra,omitempty"` // 模块自定义配置
 }
 
 // ServerConfig HTTP/WebSocket 服务监听配置。
@@ -84,6 +87,8 @@ func Default() *Config {
 			MaxFiles: 7,
 		},
 		DataDir: "data",
+		PluginDir: "bin/plugins",
+		ManifestDir: "registry/backend-modules",
 		Modules: map[string]bool{
 			"transport": true,
 			"health":    true,

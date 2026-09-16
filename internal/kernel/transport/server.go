@@ -21,8 +21,11 @@ type Server struct {
 	mux    *http.ServeMux
 
 	// handler 链：请求进入 → middleware(requestID) → middleware(accessLog) →
-	// middleware(recover) → mux
+	// middleware(recover) → gateway（API 反代）→ mux（healthz/ws/静态）
 	handler http.Handler
+
+	// gateway API 网关（反代模块进程），由 bootstrap 注入路由解析器。
+	gateway *gateway
 
 	mu       sync.Mutex
 	started  bool
@@ -50,8 +53,9 @@ func New(addr string, logger *logging.Logger) *Server {
 		logger: logger,
 		mux:    mux,
 	}
-	// 中间件链：requestID → accessLog → recover → mux
-	s.handler = s.recoverMiddleware(s.accessLogMiddleware(s.requestIDMiddleware(mux)))
+	// 中间件链：requestID → accessLog → recover → gateway → mux
+	s.gateway = newGateway(mux)
+	s.handler = s.recoverMiddleware(s.accessLogMiddleware(s.requestIDMiddleware(s.gateway)))
 	s.server = &http.Server{
 		Addr:    addr,
 		Handler: s.handler,
@@ -82,6 +86,22 @@ func (s *Server) Mux() *http.ServeMux { return s.mux }
 // HandleFunc 便捷方法：注册 method+pattern 路由。
 func (s *Server) HandleFunc(methodPattern string, fn http.HandlerFunc) {
 	s.mux.HandleFunc(methodPattern, fn)
+}
+
+// SetGatewayResolver 注入 API 网关路由解析器（把模块 HTTPBase 反代到模块进程）。
+//
+// 由 bootstrap 调用，传入 pluginhost.Bridge.Resolve；不设置时网关透传。
+func (s *Server) SetGatewayResolver(r RouteResolver) {
+	s.gateway.setResolver(r)
+}
+
+// SetStaticDir 托管前端构建产物目录（如 frontend/dist）。
+//
+// 仅在目录非空时启用；API 与 WS 路由优先于静态文件。
+func (s *Server) SetStaticDir(dir string) {
+	if h := staticHandler(dir); h != nil {
+		s.mux.Handle("/", h)
+	}
 }
 
 // Start 阻塞监听；返回的错误仅来自 ListenAndServe（端口占用等）。

@@ -1,13 +1,16 @@
+// Package health 是平台的"体检"底座（L0 内核）。
+//
+// 聚合所有模块进程的状态与健康探针，对外输出 /healthz 报告。
+// 设计依据 v3 流程梯队 1.8：「health：能报告我还活着、哪个部件坏了」。
 package health
 
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"time"
 
-	"flow-monitoring/internal/kernel/lifecycle"
-	"flow-monitoring/internal/kernel/plugin"
-	"flow-monitoring/internal/kernel/registry"
+	"flow-monitoring/internal/kernel/pluginhost"
 )
 
 // Status 整体健康状态等级。
@@ -22,8 +25,8 @@ const (
 // ModuleHealth 单个模块的健康明细。
 type ModuleHealth struct {
 	ID      string `json:"id"`
-	State   string `json:"state"`             // 生命周期状态（Started/Error/...）
-	Healthy bool   `json:"healthy"`           // 综合健康（State==Started 且探针健康）
+	State   string `json:"state"`             // 进程状态（launched/started/stopped/error）
+	Healthy bool   `json:"healthy"`           // 综合健康（State==started 且探针健康）
 	Message string `json:"message,omitempty"` // 探针或错误信息
 }
 
@@ -35,35 +38,20 @@ type Report struct {
 	Modules []ModuleHealth `json:"modules"`
 }
 
-// Health 健康聚合器。
-//
-// 线程安全；创建后绑定一个 registry 和 lifecycle.Coordinator。
-// Handler() 每次调用都实时聚合状态（不缓存，保证最新）。
+// Health 健康聚合器（线程安全；每次 Report 实时聚合，不缓存）。
 type Health struct {
-	reg      *registry.Registry
-	lc       *lifecycle.Coordinator
+	mgr       *pluginhost.Manager
 	startedAt time.Time
 }
 
-// New 创建 Health。
-//
-// 参数：
-//   - reg: 模块注册表（读 HealthFn 探针）
-//   - lc: 生命周期协调器（读模块状态）
-//
-// reg/lc 可为 nil（测试隔离场景）：此时只报告自身 uptime 与空模块列表。
-func New(reg *registry.Registry, lc *lifecycle.Coordinator) *Health {
-	return &Health{reg: reg, lc: lc, startedAt: time.Now()}
+// New 创建 Health（mgr 可为 nil，此时只报告 uptime 与空模块列表）。
+func New(mgr *pluginhost.Manager) *Health {
+	return &Health{mgr: mgr, startedAt: time.Now()}
 }
 
 // Handler 返回 /healthz HTTP handler。
 //
 // 返回 200（ok/degraded）或 503（down）。
-// 判断规则：
-//   - 有模块 State==Error → degraded（若核心模块则 down，暂统一按 degraded）
-//   - 有模块探针 Healthy==false → degraded
-//   - 全部 Started 且探针健康 → ok
-//   - 无任何模块信息 → ok（空平台刚启动）
 func (h *Health) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rep := h.Report()
@@ -85,48 +73,45 @@ func (h *Health) Report() Report {
 		Uptime:  time.Since(h.startedAt),
 		Modules: []ModuleHealth{},
 	}
-
-	var states map[string]lifecycle.State
-	if h.lc != nil {
-		states = h.lc.States()
-	}
-
-	// 若无插件注册，直接返回 ok（空平台）
-	if h.reg == nil {
+	if h.mgr == nil {
 		return rep
 	}
 
+	states := h.mgr.States()
+	procs := h.mgr.Processes()
+
+	// 稳定输出：按 ID 排序
+	ids := make([]string, 0, len(procs))
+	for id := range procs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
 	overall := StatusOK
-	for _, p := range h.reg.List() {
-		mf := p.Manifest()
+	for _, id := range ids {
+		p := procs[id]
 		mh := ModuleHealth{
-			ID:      mf.ID,
-			State:   lifecycle.StateCreated.String(), // 默认未装配
+			ID:      id,
+			State:   states[id],
 			Healthy: true,
 		}
 
-		// 1. 生命周期状态
-		if states != nil {
-			if st, ok := states[mf.ID]; ok {
-				mh.State = st.String()
-				if st == lifecycle.StateError {
-					mh.Healthy = false
-					mh.Message = "module in error state"
-				}
+		if states[id] != "started" {
+			mh.Healthy = false
+			if states[id] == "error" {
+				mh.Message = "module in error state"
+			} else if states[id] == "stopped" {
+				mh.Message = "module stopped"
 			} else {
-				mh.Healthy = false
 				mh.Message = "module not started"
 			}
 		}
 
-		// 2. 自定义探针（插件可选实现 HealthChecker）
-		if hc, ok := p.(plugin.HealthChecker); ok {
-			hs := hc.Health()
-			if !hs.Healthy {
-				mh.Healthy = false
-				if hs.Message != "" {
-					mh.Message = hs.Message
-				}
+		// 探活：远程调用模块 Health()（进程已死时返回不健康）
+		if hs := p.Module.Health(); !hs.Healthy {
+			mh.Healthy = false
+			if hs.Message != "" {
+				mh.Message = hs.Message
 			}
 		}
 

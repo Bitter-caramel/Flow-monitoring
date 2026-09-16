@@ -1,0 +1,8 @@
+{
+  "id": "modules.detect",
+  "name": "行为检测",
+  "version": "0.1.0",
+  "layer": "L2",
+  "binary": "detect",
+  "provides": ["detect.feature"]
+}

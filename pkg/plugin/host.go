@@ -1,0 +1,48 @@
+package plugin
+
+// Void 是 net/rpc 方法的空返回值（占位）。
+//
+// net/rpc 要求每个方法都有 reply 指针；无返回数据的方法统一用 Void。
+type Void struct{}
+
+// Host 是宿主进程对模块进程暴露的服务接口（跨进程契约）。
+//
+// 模块进程在 Start 阶段通过 DialHost（读环境变量 FLOW_HOST_BRIDGE）回连宿主，
+// 之后：
+//   - Config：读配置快照
+//   - Log：写宿主统一日志（保证所有模块日志汇聚一处）
+//   - Publish/Poll：经宿主 eventbus 与其他模块解耦通信
+//   - Capture*/Packet*：经宿主存储层读写元数据（模块不直连数据库）
+//
+// 设计依据：架构 v0.3 P2「契约第一」+ P3「一切可替换」；实施方案 2.0 §6.3
+// 「跨进程事件经存储抽象」。
+type Host interface {
+	Config() ConfigSnapshot
+	Log(level string, msg string)
+	Publish(topic string, data []byte) error
+	Poll(topic string, since uint64, max int) []EventRecord
+	// RegisterHTTP 模块上报自己的 HTTP 监听地址（moduleID 用于模块退出时回收路由）。
+	RegisterHTTP(httpBase, addr, moduleID string) error
+
+	// —— 服务注册 / 注入（DSH 式 everything-is-a-plugin 的服务层）——
+	// 提供者：RegisterService；消费者：LookupService。模块 Stop 时应 UnregisterService，
+	// 宿主也会在模块进程退出时兜底回收（注册是可逆副作用，卸载即回滚）。
+	RegisterService(ref ServiceRef) error
+	LookupService(name string) (ServiceRef, bool)
+	UnregisterService(name string) error
+
+	// —— 存储（模块不直连数据库，经宿主访问）——
+	// 模块侧用 internal/modules/common/hoststore 适配器把本组方法包装成
+	// 完整的 storage.Storage，从而零改动复用既有存储实现代码。
+	// 注意：原始 pcap 文件的读写由模块进程自己完成（local disk），
+	// 宿主只负责元数据索引，避免大块字节走 RPC。
+	CaptureCreate(rec CaptureRecord) error
+	CaptureGet(id string) (CaptureRecord, bool)
+	CaptureList(page Page) CapturePage
+	CaptureDelete(id string) error
+
+	PacketSaveBatch(captureID string, packets []PacketRecord) error
+	PacketList(captureID string, page Page) PacketPage
+	PacketCount(captureID string) int
+	PacketDelete(captureID string) error
+}

@@ -1,0 +1,10 @@
+{
+  "id": "modules.alert",
+  "name": "告警服务",
+  "version": "0.1.0",
+  "layer": "L2",
+  "binary": "alert",
+  "http_base": "/api/v1/alerts",
+  "provides": ["alert.api"],
+  "injects": ["situation.level"]
+}

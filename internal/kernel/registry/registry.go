@@ -1,117 +1,221 @@
+// Package registry 是模块登记本（声明式，manifest 驱动）。
+//
+// 设计依据（文件结构文档 §6 + 架构 v0.3 第 4 章）：
+//   - registry/backend-modules/*.json 是每个后端模块的"身份证"
+//   - bootstrap 读这些文件才知道要启动哪些模块、按什么顺序、装哪个二进制
+//   - 模块之间只声明依赖 ID，不感知具体实现（可替换）
+//
+// 与旧实现的区别：旧版靠 init() 自注册 + 全局单例，导致"启用模块要改内核
+// import"。本版改为：manifest 文件是装配的唯一事实来源，bootstrap 只读目录。
 package registry
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 
-	"flow-monitoring/internal/kernel/plugin"
+	"flow-monitoring/pkg/plugin"
 )
 
-// Registry 插件注册表。
+// 错误哨兵值。
+var (
+	// ErrConflict 模块 ID 冲突。
+	ErrConflict = errors.New("registry: module id conflict")
+
+	// ErrUnresolvedDep 模块依赖了未注册的模块。
+	ErrUnresolvedDep = errors.New("registry: unresolved dependency")
+
+	// ErrCyclicDependency 检测到循环依赖。
+	ErrCyclicDependency = errors.New("registry: cyclic dependency detected")
+)
+
+// Descriptor 模块声明（registry/backend-modules/*.json 文件的内容）。
 //
-// 管理 plugin.Plugin：注册 / 查询 / 拓扑排序 / 循环依赖检测。
-// 插件在 init() 中通过 Default.Register 自注册；bootstrap 读注册表装配。
-//
-// 可替换性：Register 对同 ID 冲突报错；Replace 强制覆盖（同名替换）。
+//   - Binary：模块进程二进制名（相对插件目录），宿主据此启动进程
+//   - Provides：本模块注册的服务名（DSH ctx.provide）
+//   - Injects：本模块需要的服务名（DSH inject）；宿主据此展开隐含依赖参与拓扑排序
+//   - HTTPBase：模块对外 HTTP 路由前缀（空 = 不提供 HTTP，如检测类后台模块）
+type Descriptor struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Version  string   `json:"version"`
+	Layer    string   `json:"layer"` // "L0".."L3"
+	Depends  []string `json:"depends,omitempty"`
+	Provides []string `json:"provides,omitempty"`
+	Injects  []string `json:"injects,omitempty"`
+	HTTPBase string   `json:"http_base,omitempty"`
+	Binary   string   `json:"binary,omitempty"`
+}
+
+// LayerValue 把层名字符串转成 plugin.Layer（未知返回 LayerExtension 兜底）。
+func (d Descriptor) LayerValue() plugin.Layer {
+	switch d.Layer {
+	case "L0":
+		return plugin.LayerKernel
+	case "L1":
+		return plugin.LayerFoundation
+	case "L2":
+		return plugin.LayerFeature
+	case "L3":
+		return plugin.LayerExtension
+	}
+	return plugin.LayerExtension
+}
+
+// Registry 模块声明注册表（线程安全）。
 type Registry struct {
-	mu      sync.RWMutex
-	plugins map[string]plugin.Plugin
+	mu   sync.RWMutex
+	mods map[string]Descriptor
 }
 
-// Default 包级默认注册表；插件在 init() 中向其自注册。
-var Default = New()
-
-// New 创建独立注册表（测试隔离用）。
+// New 创建空注册表。
 func New() *Registry {
-	return &Registry{plugins: make(map[string]plugin.Plugin)}
+	return &Registry{mods: make(map[string]Descriptor)}
 }
 
-// Register 注册一个插件。
+// Load 从 dir 读取所有 *.json 模块声明文件。
 //
-// 同 ID 已存在时返回 ErrConflict（保护内置插件不被误覆盖）。
-func (r *Registry) Register(p plugin.Plugin) error {
-	if p == nil || p.Manifest().ID == "" {
-		return ErrInvalidPlugin
+// dir 不存在或为空时返回空注册表（宿主可回退到编译期内置清单）；
+// 仅 JSON 解析失败或 ID 冲突时返回错误。
+func Load(dir string) (*Registry, error) {
+	r := New()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return r, nil
+		}
+		return nil, fmt.Errorf("registry: read dir %s: %w", dir, err)
 	}
-	id := p.Manifest().ID
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("registry: read %s: %w", e.Name(), err)
+		}
+		var d Descriptor
+		if err := json.Unmarshal(b, &d); err != nil {
+			return nil, fmt.Errorf("registry: parse %s: %w", e.Name(), err)
+		}
+		if err := r.Register(d); err != nil {
+			return nil, fmt.Errorf("registry: %s: %w", e.Name(), err)
+		}
+	}
+	return r, nil
+}
+
+// Register 注册一个模块声明。
+func (r *Registry) Register(d Descriptor) error {
+	if d.ID == "" {
+		return fmt.Errorf("registry: empty id")
+	}
+	if d.Binary == "" {
+		d.Binary = d.ID // 默认二进制名 = ID
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.plugins[id]; exists {
-		return fmt.Errorf("%w: %s", ErrConflict, id)
+	if _, exists := r.mods[d.ID]; exists {
+		return fmt.Errorf("%w: %s", ErrConflict, d.ID)
 	}
-	r.plugins[id] = p
+	r.mods[d.ID] = d
 	return nil
 }
 
-// MustRegister 注册；冲突 panic（仅 init() 阶段编程错误）。
-func (r *Registry) MustRegister(p plugin.Plugin) {
-	if err := r.Register(p); err != nil {
-		panic(fmt.Errorf("registry: must register %s: %w", p.Manifest().ID, err))
-	}
+// Get 查询模块声明。
+func (r *Registry) Get(id string) (Descriptor, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	d, ok := r.mods[id]
+	return d, ok
 }
 
-// Replace 强制覆盖已注册插件（可替换性）。
-func (r *Registry) Replace(p plugin.Plugin) error {
-	if p == nil || p.Manifest().ID == "" {
-		return ErrInvalidPlugin
+// Replace 覆盖（或新增）一个模块声明（用户扩展/覆盖内置用）。
+func (r *Registry) Replace(d Descriptor) error {
+	if d.ID == "" {
+		return fmt.Errorf("registry: empty id")
+	}
+	if d.Binary == "" {
+		d.Binary = d.ID
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.plugins[p.Manifest().ID] = p
+	r.mods[d.ID] = d
 	return nil
 }
 
-// Get 查询插件。
-func (r *Registry) Get(id string) (plugin.Plugin, bool) {
+// List 列出所有模块声明（按 ID 字典序稳定输出）。
+func (r *Registry) List() []Descriptor {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	p, ok := r.plugins[id]
-	return p, ok
-}
-
-// List 列出所有插件（按 ID 字典序稳定输出）。
-func (r *Registry) List() []plugin.Plugin {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]plugin.Plugin, 0, len(r.plugins))
-	for _, p := range r.plugins {
-		out = append(out, p)
+	out := make([]Descriptor, 0, len(r.mods))
+	for _, d := range r.mods {
+		out = append(out, d)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].Manifest().ID < out[j].Manifest().ID
-	})
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
-// TopologicalSort 返回插件装配顺序（依赖在前）。
+// TopologicalSort 返回装配顺序（依赖在前）。
 //
-// 依赖未注册返回 ErrUnresolvedDep；循环依赖返回 ErrCyclicDependency。
-func (r *Registry) TopologicalSort() ([]string, error) {
+// DSH 式服务注入：先由全部模块的 Provides 建"服务名 → 提供者模块"映射，
+// 再把每个模块的 Injects 展开成对提供者模块的隐含依赖，一并参与排序，
+// 从而保证"提供者先启动、消费者后启动"。
+func (r *Registry) TopologicalSort() ([]Descriptor, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	// 1. 校验依赖存在
-	for id, p := range r.plugins {
-		for _, dep := range p.Manifest().Depends {
-			if _, ok := r.plugins[dep]; !ok {
+	// 1. 服务名 → 提供者模块 ID
+	provider := make(map[string]string)
+	for _, d := range r.mods {
+		for _, svc := range d.Provides {
+			if prev, dup := provider[svc]; dup && prev != d.ID {
+				return nil, fmt.Errorf("%w: service %s provided by both %s and %s",
+					ErrConflict, svc, prev, d.ID)
+			}
+			provider[svc] = d.ID
+		}
+	}
+
+	// 2. 展开隐含依赖（Depends ∪ Injects→提供者）
+	deps := make(map[string][]string, len(r.mods))
+	for id, d := range r.mods {
+		set := append([]string(nil), d.Depends...)
+		for _, svc := range d.Injects {
+			pid, ok := provider[svc]
+			if !ok {
+				return nil, fmt.Errorf("%w: %s injects service %s but no provider", ErrUnresolvedDep, id, svc)
+			}
+			if pid != id {
+				set = append(set, pid)
+			}
+		}
+		deps[id] = set
+	}
+
+	// 3. 校验显式依赖存在
+	for id, ds := range deps {
+		for _, dep := range ds {
+			if _, ok := r.mods[dep]; !ok {
 				return nil, fmt.Errorf("%w: %s depends on unregistered %s", ErrUnresolvedDep, id, dep)
 			}
 		}
 	}
 
-	// 2. 入度 + 反向索引
-	inDegree := make(map[string]int, len(r.plugins))
+	// 4. Kahn BFS（稳定输出）
+	inDegree := make(map[string]int, len(r.mods))
 	dependents := make(map[string][]string)
-	for id, p := range r.plugins {
-		deps := p.Manifest().Depends
-		inDegree[id] = len(deps)
-		for _, dep := range deps {
+	for id, ds := range deps {
+		inDegree[id] = len(ds)
+		for _, dep := range ds {
 			dependents[dep] = append(dependents[dep], id)
 		}
 	}
 
-	// 3. Kahn BFS
 	var queue []string
 	for id, deg := range inDegree {
 		if deg == 0 {
@@ -120,11 +224,11 @@ func (r *Registry) TopologicalSort() ([]string, error) {
 	}
 	sort.Strings(queue)
 
-	result := make([]string, 0, len(r.plugins))
+	result := make([]Descriptor, 0, len(r.mods))
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		result = append(result, cur)
+		result = append(result, r.mods[cur])
 
 		children := append([]string(nil), dependents[cur]...)
 		sort.Strings(children)
@@ -137,7 +241,7 @@ func (r *Registry) TopologicalSort() ([]string, error) {
 		sort.Strings(queue)
 	}
 
-	if len(result) != len(r.plugins) {
+	if len(result) != len(r.mods) {
 		var stuck []string
 		for id, deg := range inDegree {
 			if deg > 0 {
@@ -145,64 +249,7 @@ func (r *Registry) TopologicalSort() ([]string, error) {
 			}
 		}
 		sort.Strings(stuck)
-		return result, fmt.Errorf("%w: stuck plugins %v", ErrCyclicDependency, stuck)
+		return result, fmt.Errorf("%w: stuck modules %v", ErrCyclicDependency, stuck)
 	}
 	return result, nil
-}
-
-// FindCycle 显式找一条循环依赖路径（启动日志用）。
-func (r *Registry) FindCycle() ([]string, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	const (
-		white = iota
-		gray
-		black
-	)
-	color := make(map[string]int, len(r.plugins))
-	var path, cycle []string
-	var found bool
-
-	var dfs func(id string)
-	dfs = func(id string) {
-		if found {
-			return
-		}
-		color[id] = gray
-		path = append(path, id)
-
-		p := r.plugins[id]
-		deps := append([]string(nil), p.Manifest().Depends...)
-		sort.Strings(deps)
-		for _, dep := range deps {
-			switch color[dep] {
-			case white:
-				dfs(dep)
-			case gray:
-				for i, n := range path {
-					if n == dep {
-						cycle = append(cycle, path[i:]...)
-						cycle = append(cycle, dep)
-						found = true
-						return
-					}
-				}
-			}
-		}
-		color[id] = black
-		path = path[:len(path)-1]
-	}
-
-	ids := make([]string, 0, len(r.plugins))
-	for id := range r.plugins {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		if color[id] == white {
-			dfs(id)
-		}
-	}
-	return cycle, found
 }

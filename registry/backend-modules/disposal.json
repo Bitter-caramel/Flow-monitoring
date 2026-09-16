@@ -1,0 +1,9 @@
+{
+  "id": "modules.disposal",
+  "name": "处置引擎",
+  "version": "0.1.0",
+  "layer": "L2",
+  "binary": "disposal",
+  "provides": ["disposal.action"],
+  "injects": ["situation.level"]
+}
