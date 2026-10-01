@@ -177,36 +177,53 @@ func (a *App) Shutdown(ctx context.Context) error {
 }
 
 // Run 全流程便捷入口：读配置 → 建日志 → Bootstrap → Start → Wait。
+// Run 函数是应用程序的入口点，负责初始化并启动应用程序
+// 参数:
+//   - cfgPath: 配置文件的路径
+// 返回值:
+//   - error: 如果初始化或启动过程中发生错误，则返回错误信息
+/*
+ * Run 函数是应用程序的入口点，它负责加载配置、初始化日志系统、启动应用并等待应用结束
+ * @param cfgPath 配置文件的路径
+ * @return error 如果在执行过程中出现错误，则返回错误信息
+ */
 func Run(cfgPath string) error {
+	// 从指定路径加载配置文件
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
 	}
 
+	// 根据配置文件中的日志设置创建日志记录器和日志文件
 	logger, logFile, err := logging.NewFromConfigFile(
-		logging.ParseLevel(cfg.Logging.Level),
-		cfg.Logging.Format,
+		logging.ParseLevel(cfg.Logging.Level), // 解析日志级别
+		cfg.Logging.Format,                    // 日志格式
 		cfg.Logging.Dir,
-		cfg.Logging.FileName,
+		cfg.Logging.FileName, // 日志文件名
 	)
 	if err != nil {
 		return err
 	}
 
+	// 使用配置、日志记录器和日志文件引导应用程序启动
 	app, err := Bootstrap(cfg, logger, logFile)
 	if err != nil {
-		_ = logFile.Close()
+		_ = logFile.Close() // 如果启动失败，关闭日志文件
 		return err
 	}
 
+	// 启动应用程序并传入上下文
 	if err := app.Start(context.Background()); err != nil {
 		return err
 	}
 
+	// 等待应用程序结束
 	return app.Wait(context.Background())
 }
 
+// descriptorIDs 接收一个registry.Descriptor类型的切片，返回一个包含所有描述符ID的字符串切片
 func descriptorIDs(ds []registry.Descriptor) []string {
+	// 创建一个与输入切片长度相同的字符串切片，用于存储ID
 	ids := make([]string, len(ds))
 	for i, d := range ds {
 		ids[i] = d.ID
