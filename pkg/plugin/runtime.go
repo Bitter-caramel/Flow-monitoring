@@ -27,18 +27,18 @@ const EnvHostBridge = "FLOW_HOST_BRIDGE"
 // 对应 DSH/Cordis 的"插件 apply(ctx) 返回可逆 effect"：Runtime 是标准实现，
 // 业务差异收敛到 OnStart/OnStop 两个钩子。
 type Runtime struct {
-	Spec    Manifest // 模块身份（ID/层/依赖/HTTPBase）
+	Spec Manifest // 模块身份（ID/层/依赖/HTTPBase）
 	// MakeHandler 在 Start 回连宿主后调用，用宿主构造 HTTP handler（无 HTTP 时留 nil）。
 	MakeHandler func(host Host) (http.Handler, error)
 	OnStart     func(host Host, cfg ConfigSnapshot) error
 	OnStop      func() error
 
-	host      Host
-	cfg       ConfigSnapshot
-	ln        net.Listener
-	srv       *http.Server
-	injected  map[string]ServiceRef // 已解析的注入服务
-	provided  []string              // 本模块注册的服务名（Stop 时回滚）
+	host     Host
+	cfg      ConfigSnapshot
+	ln       net.Listener
+	srv      *http.Server
+	injected map[string]ServiceRef // 已解析的注入服务
+	provided []string              // 本模块注册的服务名（Stop 时回滚）
 }
 
 var _ Module = (*Runtime)(nil)

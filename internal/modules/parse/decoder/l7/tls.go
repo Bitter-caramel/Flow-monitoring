@@ -81,8 +81,8 @@ func parseClientHello(p *datamodel.Packet, t *datamodel.TLS, hb []byte, recordLe
 		return
 	}
 	t.Version = binary.BigEndian.Uint16(body[0:2])
-	off := 2 + 32                    // 跳过 version + random
-	sidLen := int(body[off])          // session_id_len
+	off := 2 + 32            // 跳过 version + random
+	sidLen := int(body[off]) // session_id_len
 	off += 1 + sidLen
 
 	// cipher_suites_len(2)

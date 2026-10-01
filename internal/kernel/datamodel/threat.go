@@ -57,12 +57,12 @@ func (l ThreatLevel) String() string {
 type SubjState int
 
 const (
-	SubjTracking SubjState = iota // 跟踪中：默认状态
-	SubjRising                    // 上升中：连续评分高，但未达持续阈值
-	SubjSustained                 // 持续：M 个窗口都命中升阈值
-	SubjDecaying                  // 衰减中：评分降至降阈值以下，正在瘦身
-	SubjBanned                    // 已处置：动作已执行，处于冷却期
-	SubjCooling                   // 冷却中：处置动作冷却期内
+	SubjTracking  SubjState = iota // 跟踪中：默认状态
+	SubjRising                     // 上升中：连续评分高，但未达持续阈值
+	SubjSustained                  // 持续：M 个窗口都命中升阈值
+	SubjDecaying                   // 衰减中：评分降至降阈值以下，正在瘦身
+	SubjBanned                     // 已处置：动作已执行，处于冷却期
+	SubjCooling                    // 冷却中：处置动作冷却期内
 )
 
 // String 状态名。
@@ -89,9 +89,9 @@ func (s SubjState) String() string {
 // 公式：Score(t) = Σ feature.weight × recency_decay × confidence
 // 设计参考 v0.3 第 9.5 节。
 type ThreatScore struct {
-	Value      float64   // 当前评分（0-100）
-	Confidence float64   // 置信度（0-1）
-	UpdatedAt  time.Time // 最后一次更新时间
+	Value         float64       // 当前评分（0-100）
+	Confidence    float64       // 置信度（0-1）
+	UpdatedAt     time.Time     // 最后一次更新时间
 	DecayHalfLife time.Duration // 半衰期（默认 5min，参考 v0.3 第 9.9 节）
 }
 
@@ -102,18 +102,18 @@ type ThreatScore struct {
 //   - 以 srcIP→(dstIP) 为键入并发表
 //   - 每个保护目标最多维护可配置上限的活跃 Subject，超限走资源保护
 type Subject struct {
-	Key       string                 // srcIP+dstIP+协议族聚合键
-	SrcIP     uint32                 // 攻击侧 IP
-	DstIP     uint32                 // 保护目标 IP，0=任意目标
-	FlowIndex map[string]uint64      // 下属流 ID → 包数（受水位限制）
-	Score     ThreatScore
-	Level     ThreatLevel            // 1/2/3/0（L1/L2/L3/L0）
-	State     SubjState              // tracking/rising/sustained/decaying/banned/cooling
-	Evidences []Evidence             // 证据链（见 Evidence）
-	Banned    bool                  // 是否已处置
-	BannedAt  *time.Time             // 处置时间
-	UpdatedAt time.Time              // 最后活跃时间
-	CoolingUntil time.Time           // 冷却到期时间（处置动作后）
+	Key          string            // srcIP+dstIP+协议族聚合键
+	SrcIP        uint32            // 攻击侧 IP
+	DstIP        uint32            // 保护目标 IP，0=任意目标
+	FlowIndex    map[string]uint64 // 下属流 ID → 包数（受水位限制）
+	Score        ThreatScore
+	Level        ThreatLevel // 1/2/3/0（L1/L2/L3/L0）
+	State        SubjState   // tracking/rising/sustained/decaying/banned/cooling
+	Evidences    []Evidence  // 证据链（见 Evidence）
+	Banned       bool        // 是否已处置
+	BannedAt     *time.Time  // 处置时间
+	UpdatedAt    time.Time   // 最后活跃时间
+	CoolingUntil time.Time   // 冷却到期时间（处置动作后）
 }
 
 // Evidence 证据链单条记录。
@@ -121,17 +121,17 @@ type Subject struct {
 // 对应 v0.3 第 9.5 节："每个 Evidence 记录 时间/特征类型/源证据/关联 Subject"。
 // 是攻击链收集的基本单位。
 type Evidence struct {
-	Time        time.Time
-	Kind        string    // scan/brute/tunnel/beacon/rule_hit/stat_anomaly
-	SubjectKey  string    // 关联 Subject.Key
-	SrcIP       uint32
-	DstIP       uint32
-	Weight      float64   // 该证据的权重
-	Confidence  float64   // 置信度（0-1）
-	Payload     []byte     // 证据引用（包号/规则ID，二进制编码后写）
-	PacketNo    int        // 关联的包号
-	RuleID      string     // 关联的规则 ID（若有）
-	AlertID     string     // 关联的告警 ID（若有）
+	Time       time.Time
+	Kind       string // scan/brute/tunnel/beacon/rule_hit/stat_anomaly
+	SubjectKey string // 关联 Subject.Key
+	SrcIP      uint32
+	DstIP      uint32
+	Weight     float64 // 该证据的权重
+	Confidence float64 // 置信度（0-1）
+	Payload    []byte  // 证据引用（包号/规则ID，二进制编码后写）
+	PacketNo   int     // 关联的包号
+	RuleID     string  // 关联的规则 ID（若有）
+	AlertID    string  // 关联的告警 ID（若有）
 }
 
 // FeatureEvent 检测源向 situation-engine 注入的特征事件。
@@ -139,14 +139,14 @@ type Evidence struct {
 // 对应 v0.3 第 9.8 节 SituationAPI.ReportEvent 入参。
 // 特征来源：行为检测/suricata 适配/统计异常/规则命中。
 type FeatureEvent struct {
-	Time        time.Time
-	Kind        string    // scan/brute/tunnel/beacon/rule_hit/stat_anomaly
-	SubjectKey  string
-	SrcIP       uint32
-	DstIP       uint32
-	Weight      float64
-	Confidence  float64
-	Payload     []byte    // 证据引用（包号/规则ID）
+	Time       time.Time
+	Kind       string // scan/brute/tunnel/beacon/rule_hit/stat_anomaly
+	SubjectKey string
+	SrcIP      uint32
+	DstIP      uint32
+	Weight     float64
+	Confidence float64
+	Payload    []byte // 证据引用（包号/规则ID）
 }
 
 // LevelChange 态势等级变化（推送给前端）。
@@ -156,17 +156,17 @@ type LevelChange struct {
 	From       ThreatLevel
 	To         ThreatLevel
 	At         time.Time
-	Reason     string    // 升降级原因（评分/窗口计数/自保护...）
+	Reason     string // 升降级原因（评分/窗口计数/自保护...）
 }
 
 // ResourceReport 资源水位报告。
 // 对应 v0.3 第 9.7 节资源自保护的硬机制。
 type ResourceReport struct {
-	ActiveSubjects int           // 当前活跃 Subject 数量
-	MaxSubjects    int           // 配置上限
-	EventQueueDepth int         // 特征事件队列深度
-	EventQueueMax   int         // 队列上限
-	DroppedEvents   uint64      // 因背压丢弃的低优先级特征数
+	ActiveSubjects    int           // 当前活跃 Subject 数量
+	MaxSubjects       int           // 配置上限
+	EventQueueDepth   int           // 特征事件队列深度
+	EventQueueMax     int           // 队列上限
+	DroppedEvents     uint64        // 因背压丢弃的低优先级特征数
 	AvgProcessLatency time.Duration // 平均处理时延
-	SelfProtectActive bool       // 是否处于自保护降采样模式
+	SelfProtectActive bool          // 是否处于自保护降采样模式
 }

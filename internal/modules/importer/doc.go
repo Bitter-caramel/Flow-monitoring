@@ -6,8 +6,9 @@
 //   - 实施方案 2.0 第 7.1 节导入流程
 //
 // 职责编排（单条链路）：
-//   文件字节 → pcapng.Parse（容器解析）→ decoder.Decode（协议解码）
-//   → 转 storage.PacketRecord → packetstore.SaveCapture（文件 + 元数据 + 索引入库）
+//
+//	文件字节 → pcapng.Parse（容器解析）→ decoder.Decode（协议解码）
+//	→ 转 storage.PacketRecord → packetstore.SaveCapture（文件 + 元数据 + 索引入库）
 //
 // 本包是解析核心（parse/*）与存储（storage/packetstore）之间的粘合层，
 // 让 parse-cli 的解析能力变成可持久化、可查询的服务能力。

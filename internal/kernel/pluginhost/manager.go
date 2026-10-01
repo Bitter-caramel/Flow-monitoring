@@ -10,8 +10,8 @@ import (
 	"runtime"
 	"sync"
 
-	hplugin "github.com/hashicorp/go-plugin"
 	"github.com/hashicorp/go-hclog"
+	hplugin "github.com/hashicorp/go-plugin"
 
 	"flow-monitoring/internal/kernel/config"
 	"flow-monitoring/internal/kernel/logging"
