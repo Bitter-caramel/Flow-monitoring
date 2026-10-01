@@ -3,6 +3,7 @@
   "name": "攻击链收集",
   "version": "0.1.0",
   "layer": "L2",
+  "enabled": false,
   "binary": "attackchain",
   "provides": ["attackchain.chain"],
   "injects": ["detect.feature", "situation.level"]

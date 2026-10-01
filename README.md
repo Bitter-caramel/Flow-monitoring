@@ -27,7 +27,7 @@
 
 - **内核最小化**：内核不 import 任何业务模块，只读注册表启动它们。
 - **模块 = 独立进程**：一个模块崩溃不拖垮宿主。
-- **声明式启停**：模块身份写在 `registry/backend-modules/*.json`，加/删/换模块 = 改 json + 换二进制，内核零改动。
+- **声明式启停**：模块身份与开关都写在 `registry/backend-modules/*.json`（`enabled` 字段），加/删/换/停模块 = 改 json + 换二进制，内核零改动。未启用的模块不参与装配，只留在目录里可见可查。
 - **模块间解耦**：靠事件总线（Publish/Poll）和服务注入（provides/injects）通信，不直连、不直连数据库。
 
 ## 二、目录结构
@@ -51,7 +51,7 @@
 # 构建全部模块进程到 bin/plugins/
 bash scripts/build-plugins.sh
 
-# 启动宿主（默认 :8080，读 registry/backend-modules/*.json）
+# 启动宿主（默认 :18080，读 registry/backend-modules/*.json）
 go run ./cmd/server
 
 # 离线解析一个抓包文件（与框架无关，纯解析验证）
@@ -69,8 +69,8 @@ go run ./cmd/parse-cli testdata/test.pcapng
 | 解析引擎 | ✅ 完成（pcapng reader + L2/L3/L4/L7 解码：DNS/DHCP/HTTP/TLS 等） |
 | 存储 | ✅ 完成（PostgreSQL + 原始包文件仓库 packetstore） |
 | 前端壳 | ✅ 完成（shell + 面板注册表 + 2 个面板） |
-| 完整插件样板 | ✅ `query`（module.go + main.go + json 三件套） |
-| 其余 11 个模块 | ⬜ 已注册 json，业务代码待补：detect / situation / disposal / alert / attackchain / auth / capture / rule / ioc / case / export |
+| 完整插件样板 | ✅ `query`、`importer`（module.go + main.go + json 三件套） |
+| 其余 11 个模块 | ⬜ 已注册 json（`enabled: false`），业务代码待补：detect / situation / disposal / alert / attackchain / auth / capture / rule / ioc / case / export |
 
 ## 五、文档
 

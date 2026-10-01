@@ -3,6 +3,7 @@
   "name": "IoC 与白名单",
   "version": "0.1.0",
   "layer": "L1",
+  "enabled": false,
   "binary": "ioc",
   "provides": ["ioc.model"]
 }

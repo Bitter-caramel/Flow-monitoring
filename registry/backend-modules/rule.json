@@ -3,6 +3,7 @@
   "name": "规则统一模型",
   "version": "0.1.0",
   "layer": "L1",
+  "enabled": false,
   "binary": "rule",
   "provides": ["rule.model"]
 }

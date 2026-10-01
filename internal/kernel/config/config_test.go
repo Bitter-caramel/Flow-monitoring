@@ -3,28 +3,25 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 // TestDefault 保障默认值合理（PG DSN、HTTP 端口、日志路径等）。
 func TestDefault(t *testing.T) {
 	c := Default()
-	if c.Server.HTTPAddr != ":8080" {
-		t.Errorf("HTTPAddr default = %q, want :8080", c.Server.HTTPAddr)
+	if c.Server.HTTPAddr != ":18080" {
+		t.Errorf("HTTPAddr default = %q, want :18080", c.Server.HTTPAddr)
+	}
+	// DSN 端口须与 scripts/docker-compose.yml 的宿主映射（5433）一致
+	if !strings.Contains(c.Database.DSN, ":5433/") {
+		t.Errorf("DSN default = %q, want host port 5433", c.Database.DSN)
 	}
 	if c.Database.Driver != "postgres" {
 		t.Errorf("DB driver default = %q, want postgres", c.Database.Driver)
 	}
 	if c.Logging.Dir != "logs" || c.Logging.FileName != "program.log" {
 		t.Errorf("log default = %s/%s, want logs/program.log", c.Logging.Dir, c.Logging.FileName)
-	}
-	// 默认应启用 transport 与 health
-	if !c.IsModuleEnabled("transport") || !c.IsModuleEnabled("health") {
-		t.Errorf("transport/health should be enabled by default")
-	}
-	// 未在表中的模块视为禁用
-	if c.IsModuleEnabled("nonexistent-module") {
-		t.Errorf("unknown module should not be enabled")
 	}
 }
 
@@ -34,7 +31,7 @@ func TestLoad_MissingFileReturnsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(\"\") err = %v", err)
 	}
-	if c.Server.HTTPAddr != ":8080" {
+	if c.Server.HTTPAddr != ":18080" {
 		t.Errorf("default HTTPAddr expected, got %q", c.Server.HTTPAddr)
 	}
 }

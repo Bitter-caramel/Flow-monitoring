@@ -3,6 +3,7 @@
   "name": "案件服务",
   "version": "0.1.0",
   "layer": "L2",
+  "enabled": false,
   "binary": "case",
   "http_base": "/api/v1/cases",
   "provides": ["case.api"]

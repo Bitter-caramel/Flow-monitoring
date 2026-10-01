@@ -40,7 +40,7 @@ type wsRoute struct {
 
 // New 创建 Server。
 //
-// addr 为监听地址（如 ":8080"）；logger 不能为 nil（否则 New 返回 nil）。
+// addr 为监听地址（如 ":18080"）；logger 不能为 nil（否则 New 返回 nil）。
 //
 // 返回的 Server 尚未监听；调用 Start 后才对外服务。
 func New(addr string, logger *logging.Logger) *Server {

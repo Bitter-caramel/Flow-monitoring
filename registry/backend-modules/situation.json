@@ -3,6 +3,7 @@
   "name": "态势评估引擎",
   "version": "0.1.0",
   "layer": "L2",
+  "enabled": false,
   "binary": "situation",
   "provides": ["situation.level"],
   "injects": ["detect.feature"]
