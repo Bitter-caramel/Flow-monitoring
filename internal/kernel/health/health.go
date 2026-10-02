@@ -34,7 +34,7 @@ type ModuleHealth struct {
 type Report struct {
 	Status  Status         `json:"status"`
 	Time    time.Time      `json:"time"`
-	Uptime  time.Duration  `json:"uptime_ms"` // 毫秒
+	Uptime  int64          `json:"uptime_ms"` // 毫秒
 	Modules []ModuleHealth `json:"modules"`
 }
 
@@ -70,7 +70,7 @@ func (h *Health) Report() Report {
 	rep := Report{
 		Status:  StatusOK,
 		Time:    time.Now(),
-		Uptime:  time.Since(h.startedAt),
+		Uptime:  time.Since(h.startedAt).Milliseconds(),
 		Modules: []ModuleHealth{},
 	}
 	if h.mgr == nil {

@@ -39,17 +39,23 @@ var (
 //   - Provides：本模块注册的服务名（DSH ctx.provide）
 //   - Injects：本模块需要的服务名（DSH inject）；宿主据此展开隐含依赖参与拓扑排序
 //   - HTTPBase：模块对外 HTTP 路由前缀（空 = 不提供 HTTP，如检测类后台模块）
+//   - Enabled：是否参与装配。声明与开关放在同一处，加/减模块只动这一个文件；
+//     缺省（不写该字段）视为启用，显式 false 才停用——避免忘了写字段导致全体不启动。
 type Descriptor struct {
 	ID       string   `json:"id"`
 	Name     string   `json:"name"`
 	Version  string   `json:"version"`
 	Layer    string   `json:"layer"` // "L0".."L3"
+	Enabled  *bool    `json:"enabled,omitempty"`
 	Depends  []string `json:"depends,omitempty"`
 	Provides []string `json:"provides,omitempty"`
 	Injects  []string `json:"injects,omitempty"`
 	HTTPBase string   `json:"http_base,omitempty"`
 	Binary   string   `json:"binary,omitempty"`
 }
+
+// IsEnabled 是否参与装配（缺省启用）。
+func (d Descriptor) IsEnabled() bool { return d.Enabled == nil || *d.Enabled }
 
 // LayerValue 把层名字符串转成 plugin.Layer（未知返回 LayerExtension 兜底）。
 func (d Descriptor) LayerValue() plugin.Layer {
@@ -160,18 +166,47 @@ func (r *Registry) List() []Descriptor {
 	return out
 }
 
-// TopologicalSort 返回装配顺序（依赖在前）。
+// ListEnabled 列出参与装配的模块声明（按 ID 字典序稳定输出）。
 //
-// DSH 式服务注入：先由全部模块的 Provides 建"服务名 → 提供者模块"映射，
+// 与 List 的区别：List 返回全部声明（含 enabled=false 的，供展示/管理），
+// 本方法只返回会被真正装配的。
+func (r *Registry) ListEnabled() []Descriptor {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Descriptor, 0, len(r.mods))
+	for _, d := range r.mods {
+		if d.IsEnabled() {
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// TopologicalSort 返回装配顺序（依赖在前），只处理 enabled 的模块。
+//
+// DSH 式服务注入：先由全部启用模块的 Provides 建"服务名 → 提供者模块"映射，
 // 再把每个模块的 Injects 展开成对提供者模块的隐含依赖，一并参与排序，
 // 从而保证"提供者先启动、消费者后启动"。
+//
+// enabled=false 的模块既不参与排序，也不算"可被依赖"：若某个启用模块依赖了
+// 一个已停用的模块，会在下面第 3 步报 ErrUnresolvedDep（提示去启用它），
+// 而不是静默地少启动一个模块。
 func (r *Registry) TopologicalSort() ([]Descriptor, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	// 0. 过滤出启用模块（装配的唯一输入）
+	active := make(map[string]Descriptor, len(r.mods))
+	for id, d := range r.mods {
+		if d.IsEnabled() {
+			active[id] = d
+		}
+	}
+
 	// 1. 服务名 → 提供者模块 ID
 	provider := make(map[string]string)
-	for _, d := range r.mods {
+	for _, d := range active {
 		for _, svc := range d.Provides {
 			if prev, dup := provider[svc]; dup && prev != d.ID {
 				return nil, fmt.Errorf("%w: service %s provided by both %s and %s",
@@ -182,8 +217,8 @@ func (r *Registry) TopologicalSort() ([]Descriptor, error) {
 	}
 
 	// 2. 展开隐含依赖（Depends ∪ Injects→提供者）
-	deps := make(map[string][]string, len(r.mods))
-	for id, d := range r.mods {
+	deps := make(map[string][]string, len(active))
+	for id, d := range active {
 		set := append([]string(nil), d.Depends...)
 		for _, svc := range d.Injects {
 			pid, ok := provider[svc]
@@ -197,17 +232,17 @@ func (r *Registry) TopologicalSort() ([]Descriptor, error) {
 		deps[id] = set
 	}
 
-	// 3. 校验显式依赖存在
+	// 3. 校验依赖存在（未注册或已停用都算未解析）
 	for id, ds := range deps {
 		for _, dep := range ds {
-			if _, ok := r.mods[dep]; !ok {
-				return nil, fmt.Errorf("%w: %s depends on unregistered %s", ErrUnresolvedDep, id, dep)
+			if _, ok := active[dep]; !ok {
+				return nil, fmt.Errorf("%w: %s depends on %s (unregistered or disabled)", ErrUnresolvedDep, id, dep)
 			}
 		}
 	}
 
 	// 4. Kahn BFS（稳定输出）
-	inDegree := make(map[string]int, len(r.mods))
+	inDegree := make(map[string]int, len(active))
 	dependents := make(map[string][]string)
 	for id, ds := range deps {
 		inDegree[id] = len(ds)
@@ -224,11 +259,11 @@ func (r *Registry) TopologicalSort() ([]Descriptor, error) {
 	}
 	sort.Strings(queue)
 
-	result := make([]Descriptor, 0, len(r.mods))
+	result := make([]Descriptor, 0, len(active))
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		result = append(result, r.mods[cur])
+		result = append(result, active[cur])
 
 		children := append([]string(nil), dependents[cur]...)
 		sort.Strings(children)
@@ -241,7 +276,7 @@ func (r *Registry) TopologicalSort() ([]Descriptor, error) {
 		sort.Strings(queue)
 	}
 
-	if len(result) != len(r.mods) {
+	if len(result) != len(active) {
 		var stuck []string
 		for id, deg := range inDegree {
 			if deg > 0 {

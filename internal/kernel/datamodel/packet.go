@@ -45,7 +45,7 @@ type Packet struct {
 	StreamID   int       // 流 ID（sid，-1=未分配）
 	StreamDir  uint8     // 流方向（0/1，sdir）
 	Retransmit bool      // 重传标志，reTx
-	TCPEvent    *TCPEvent // TCP 状态机事件（reTx 的扩展）
+	TCPEvent   *TCPEvent // TCP 状态机事件（reTx 的扩展）
 
 	// === 链路层 ===
 	SrcMAC    string // 源 MAC，esrc
@@ -53,18 +53,18 @@ type Packet struct {
 	EtherType uint16 // EtherType，etype
 
 	// === 网络层 ===
-	IPVersion uint8  // 4 或 6，ipv
-	SrcIP     string // 源 IP（展示），isrc
-	DstIP     string // 目的 IP（展示），idst
-	SrcIPNum  uint32 // 源 IPv4 整数（用于 O(1) 过滤/会话 key），isrcN
-	DstIPNum  uint32 // 目的 IPv4 整数，idstN
-	TTL       uint8
-	IPID      uint16 // IP 标识，ipid
-	IPLen     int    // IP 总长，iplen
-	DF        bool   // Don't Fragment
-	MF        bool   // More Fragments
-	FragOff   int    // Fragment Offset，fo（8 字节单位）
-	Fragmented bool  // 是否分片（FragOff>0 或 MF）
+	IPVersion  uint8  // 4 或 6，ipv
+	SrcIP      string // 源 IP（展示），isrc
+	DstIP      string // 目的 IP（展示），idst
+	SrcIPNum   uint32 // 源 IPv4 整数（用于 O(1) 过滤/会话 key），isrcN
+	DstIPNum   uint32 // 目的 IPv4 整数，idstN
+	TTL        uint8
+	IPID       uint16 // IP 标识，ipid
+	IPLen      int    // IP 总长，iplen
+	DF         bool   // Don't Fragment
+	MF         bool   // More Fragments
+	FragOff    int    // Fragment Offset，fo（8 字节单位）
+	Fragmented bool   // 是否分片（FragOff>0 或 MF）
 
 	// === 异常标志 ===
 	Malformed bool // 解码异常，mal

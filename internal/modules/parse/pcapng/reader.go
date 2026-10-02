@@ -22,21 +22,21 @@ const (
 
 // 选项 code 常量（IDB/SHB 共用部分）。
 const (
-	optEnd         = 0
-	optComment     = 1
-	optHardware    = 2 // SHB
-	optOS          = 3 // SHB
-	optUserAppl    = 4 // SHB
-	optIFName      = 2 // IDB
-	optIFDesc      = 3 // IDB
-	optIFIPv4      = 4 // IDB
-	optIFMAC       = 6 // IDB
-	optIFSpeed     = 8 // IDB
-	optIFTSResol   = 9 // IDB
-	optIFFilter    = 11 // IDB
-	optIFOS        = 12 // IDB
-	optIFTSOffset  = 14 // IDB
-	optIFHardware  = 15 // IDB
+	optEnd        = 0
+	optComment    = 1
+	optHardware   = 2  // SHB
+	optOS         = 3  // SHB
+	optUserAppl   = 4  // SHB
+	optIFName     = 2  // IDB
+	optIFDesc     = 3  // IDB
+	optIFIPv4     = 4  // IDB
+	optIFMAC      = 6  // IDB
+	optIFSpeed    = 8  // IDB
+	optIFTSResol  = 9  // IDB
+	optIFFilter   = 11 // IDB
+	optIFOS       = 12 // IDB
+	optIFTSOffset = 14 // IDB
+	optIFHardware = 15 // IDB
 	// EPB 包级选项
 	optEpbComment = 1
 	optEpbDir     = 2 // 方向：低 2 位，1=入 2=出
@@ -64,15 +64,15 @@ func Parse(data []byte, limit int) (*datamodel.Capture, error) {
 	r := &reader{data: data, le: true, bo: binary.LittleEndian}
 
 	c := &datamodel.Capture{
-		Format:   "pcapng",
-		Endian:   "little",
-		Packets:  []*datamodel.Packet{},
-		Ifaces:   []datamodel.Interface{},
-		Raw:      data,
-		Kind:     "pcapng",
-		NRB:      map[uint32]string{},
-		Warns:    []string{},
-		Stats:    []datamodel.InterfaceStat{},
+		Format:  "pcapng",
+		Endian:  "little",
+		Packets: []*datamodel.Packet{},
+		Ifaces:  []datamodel.Interface{},
+		Raw:     data,
+		Kind:    "pcapng",
+		NRB:     map[uint32]string{},
+		Warns:   []string{},
+		Stats:   []datamodel.InterfaceStat{},
 	}
 
 	off := 0
@@ -300,7 +300,7 @@ func (r *reader) parseEPB(c *datamodel.Capture, no, bodyStart, bodyEnd int) int 
 	p := datamodel.NewPacket()
 	p.No = no + 1
 	p.Sec = secs
-	p.Usec = int64(frac * 1e6) % 1_000_000
+	p.Usec = int64(frac*1e6) % 1_000_000
 	p.Time = time.Unix(secs, int64(frac*1e9))
 	p.CapLen = dataEnd - dataStart
 	p.OrigLen = origLen

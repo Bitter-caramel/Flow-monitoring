@@ -60,13 +60,13 @@ func TestNew_WithAttrs_SharesSeq(t *testing.T) {
 // TestParseLevel 校验级别字符串解析。
 func TestParseLevel(t *testing.T) {
 	cases := map[string]Level{
-		"DEBUG":  LevelDebug,
-		"debug":  LevelDebug,
-		"INFO":   LevelInfo,
-		"":       LevelInfo,
+		"DEBUG":   LevelDebug,
+		"debug":   LevelDebug,
+		"INFO":    LevelInfo,
+		"":        LevelInfo,
 		"unknown": LevelInfo,
-		"WARN":   LevelWarn,
-		"ERROR":  LevelError,
+		"WARN":    LevelWarn,
+		"ERROR":   LevelError,
 	}
 	for in, want := range cases {
 		if got := ParseLevel(in); got != want {
@@ -93,4 +93,3 @@ func TestNew_BelowLevelFiltered(t *testing.T) {
 		t.Errorf("seq should be 1 for first emitted log, got: %s", buf.String())
 	}
 }
-

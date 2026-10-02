@@ -11,10 +11,10 @@ import (
 
 // pageResponse 分页响应体。
 type pageResponse[T any] struct {
-	Items  []T   `json:"items"`
-	Total  int   `json:"total"`
-	Offset int   `json:"offset"`
-	Limit  int   `json:"limit"`
+	Items  []T `json:"items"`
+	Total  int `json:"total"`
+	Offset int `json:"offset"`
+	Limit  int `json:"limit"`
 }
 
 // Handler 返回 query 服务的 HTTP 路由。

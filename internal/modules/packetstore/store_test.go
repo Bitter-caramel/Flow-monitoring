@@ -53,7 +53,9 @@ func (s *memPacketStore) SaveBatch(_ context.Context, id string, pkts []storage.
 func (s *memPacketStore) ListByCapture(_ context.Context, id string, _ storage.Page) (*storage.PageResult[storage.PacketRecord], error) {
 	return &storage.PageResult[storage.PacketRecord]{Items: s.m.packets[id], Total: len(s.m.packets[id])}, nil
 }
-func (s *memPacketStore) Count(_ context.Context, id string) (int, error) { return len(s.m.packets[id]), nil }
+func (s *memPacketStore) Count(_ context.Context, id string) (int, error) {
+	return len(s.m.packets[id]), nil
+}
 func (s *memPacketStore) DeleteByCapture(_ context.Context, id string) error {
 	delete(s.m.packets, id)
 	return nil

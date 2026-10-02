@@ -21,22 +21,21 @@ import (
 
 // Config 平台主配置。
 type Config struct {
-	Server     ServerConfig  `json:"server"`
-	Database   DBConfig      `json:"database"`
-	Logging    LogConfig     `json:"logging"`
-	DataDir    string        `json:"data_dir"`    // 原始抓包文件目录
-	PluginDir  string        `json:"plugin_dir"`  // 模块进程二进制目录
-	ManifestDir string       `json:"manifest_dir"` // 用户扩展模块清单目录（L3）
-	StaticDir  string        `json:"static_dir"`  // 前端构建产物目录（空=不托管）
-	Modules    map[string]bool `json:"modules"`
-	Extra      map[string]any `json:"extra,omitempty"` // 模块自定义配置
+	Server      ServerConfig   `json:"server"`
+	Database    DBConfig       `json:"database"`
+	Logging     LogConfig      `json:"logging"`
+	DataDir     string         `json:"data_dir"`        // 原始抓包文件目录
+	PluginDir   string         `json:"plugin_dir"`      // 模块进程二进制目录
+	ManifestDir string         `json:"manifest_dir"`    // 用户扩展模块清单目录（L3）
+	StaticDir   string         `json:"static_dir"`      // 前端构建产物目录（空=不托管）
+	Extra       map[string]any `json:"extra,omitempty"` // 模块自定义配置
 }
 
 // ServerConfig HTTP/WebSocket 服务监听配置。
 type ServerConfig struct {
-	HTTPAddr string `json:"http_addr"` // 监听地址，如 ":8080"
+	HTTPAddr string `json:"http_addr"` // 监听地址，如 ":18080"
 	WSAddr   string `json:"ws_addr"`   // WebSocket 地址，默认与 HTTPAddr 复用
-	Debug    bool   `json:"debug"`    // 调试模式（更详细日志 / 允许 CORS）
+	Debug    bool   `json:"debug"`     // 调试模式（更详细日志 / 允许 CORS）
 }
 
 // DBConfig PostgreSQL 数据库连接配置。
@@ -62,19 +61,22 @@ type LogConfig struct {
 
 // Default 返回开发期默认配置。
 //
-//   - HTTP 监听 :8080
-//   - PG DSN: postgres://flow:flow@127.0.0.1:5432/flow?sslmode=disable
+//   - HTTP 监听 :18080（与 frontend/vite.config.ts 的代理目标一致）
+//   - PG DSN: postgres://flow:flow@127.0.0.1:5433/flow?sslmode=disable
+//     （与 scripts/docker-compose.yml 的宿主端口映射一致；5432 常被 WSL 占用）
 //   - 日志输出 JSON 格式到 ./logs/program.log，INFO 级别
-//   - 默认启用所有 P0 内核模块
+//
+// 模块启停不在这里控制：由 registry/backend-modules/*.json 的 enabled 字段决定，
+// 保持"一个模块的声明与开关在同一处"。
 func Default() *Config {
 	return &Config{
 		Server: ServerConfig{
-			HTTPAddr: ":8080",
+			HTTPAddr: ":18080",
 			Debug:    true,
 		},
 		Database: DBConfig{
 			Driver:   "postgres",
-			DSN:      "postgres://flow:flow@127.0.0.1:5432/flow?sslmode=disable",
+			DSN:      "postgres://flow:flow@127.0.0.1:5433/flow?sslmode=disable",
 			MaxConns: 50,
 			MaxIdle:  10,
 		},
@@ -86,14 +88,9 @@ func Default() *Config {
 			MaxSize:  100,
 			MaxFiles: 7,
 		},
-		DataDir: "data",
-		PluginDir: "bin/plugins",
+		DataDir:     "data",
+		PluginDir:   "bin/plugins",
 		ManifestDir: "registry/backend-modules",
-		Modules: map[string]bool{
-			"transport": true,
-			"health":    true,
-			// L1+ 模块按 v3 梯队进度逐步开启
-		},
 	}
 }
 
@@ -144,13 +141,4 @@ func applyEnv(c *Config) *Config {
 		c.Server.Debug = false
 	}
 	return c
-}
-
-// IsModuleEnabled 查询某模块是否启用。
-//
-// 不在 Modules 表中的视为默认禁用；
-// 表中 true=启用，false=显式禁用。
-func (c *Config) IsModuleEnabled(name string) bool {
-	v, ok := c.Modules[name]
-	return ok && v
 }

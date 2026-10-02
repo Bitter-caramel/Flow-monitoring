@@ -13,47 +13,47 @@ import "time"
 
 // ICMP 网络层控制消息。
 type ICMP struct {
-	Type        uint8  // 类型（8=Echo Request, 0=Echo Reply, 3=Dest Unreachable...）
-	Code        uint8  // 代码
-	Checksum    uint16 // 校验和
-	ID          uint16 // Echo ID（请求/响应配对用）
-	Seq         uint16 // Echo 序号
+	Type         uint8  // 类型（8=Echo Request, 0=Echo Reply, 3=Dest Unreachable...）
+	Code         uint8  // 代码
+	Checksum     uint16 // 校验和
+	ID           uint16 // Echo ID（请求/响应配对用）
+	Seq          uint16 // Echo 序号
 	DestUnreach  bool   // 是否"目标不可达"
 	TimeExceeded bool   // 是否"超时"（TTL 用尽）
 }
 
 // ARP 地址解析协议。
 type ARP struct {
-	Opcode   uint16 // 1=请求, 2=响应
-	SenderIP string
-	SenderMAC string
-	TargetIP  string
-	TargetMAC string
+	Opcode       uint16 // 1=请求, 2=响应
+	SenderIP     string
+	SenderMAC    string
+	TargetIP     string
+	TargetMAC    string
 	IsGratuitous bool // 免费 ARP
 }
 
 // DHCP 动态主机配置。
 type DHCP struct {
-	Op       uint8  // 1=请求, 2=响应
-	XID      uint32 // 事务 ID（请求/响应配对）
-	CIADDR   string // 客户端 IP
-	YIADDR   string // 你的 IP（分配的）
-	SIADDR   string // 服务器 IP
-	HostName string // option 12
+	Op        uint8  // 1=请求, 2=响应
+	XID       uint32 // 事务 ID（请求/响应配对）
+	CIADDR    string // 客户端 IP
+	YIADDR    string // 你的 IP（分配的）
+	SIADDR    string // 服务器 IP
+	HostName  string // option 12
 	LeaseTime uint32 // option 51（秒）
-	MsgType  string // option 53: discover/offer/request/ack/nak
+	MsgType   string // option 53: discover/offer/request/ack/nak
 }
 
 // DNS 域名解析。
 type DNS struct {
-	ID         uint16 // 事务 ID
-	QR         bool   // false=查询, true=响应
-	OpCode     uint8  // 0=标准查询, 4=反向, 5=动态更新
-	RCode      uint8  // 0=NOERROR, 3=NXDOMAIN...
-	Questions  []DNSQuestion
-	Answers    []DNSResource
-	Authorities []DNSResource
-	Additionals []DNSResource
+	ID           uint16 // 事务 ID
+	QR           bool   // false=查询, true=响应
+	OpCode       uint8  // 0=标准查询, 4=反向, 5=动态更新
+	RCode        uint8  // 0=NOERROR, 3=NXDOMAIN...
+	Questions    []DNSQuestion
+	Answers      []DNSResource
+	Authorities  []DNSResource
+	Additionals  []DNSResource
 	ResponseTime time.Duration // 响应耗时（响应包配对请求时填）
 }
 
@@ -90,36 +90,36 @@ type TLS struct {
 
 // TLSCertificate TLS 证书。
 type TLSCertificate struct {
-	CN        string // Common Name
-	Issuer    string // 颁发者 CN
-	NotBefore string
-	NotAfter  string
+	CN         string // Common Name
+	Issuer     string // 颁发者 CN
+	NotBefore  string
+	NotAfter   string
 	SelfSigned bool
-	WeakSig   bool // MD5/SHA1
+	WeakSig    bool // MD5/SHA1
 }
 
 // HTTP 超文本传输。
 type HTTP struct {
-	IsRequest    bool
-	Method       string // GET/POST/PUT/DELETE...
-	URI          string
-	StatusCode   int
-	StatusText   string
-	Host         string
-	UserAgent    string
-	ContentType  string
+	IsRequest     bool
+	Method        string // GET/POST/PUT/DELETE...
+	URI           string
+	StatusCode    int
+	StatusText    string
+	Host          string
+	UserAgent     string
+	ContentType   string
 	ContentLength int64
-	RequestTime  time.Time
-	ResponseTime time.Time
-	Duration     time.Duration
-	Decrypted    bool // 来自 TLS 解密还原（区分链路明文）
+	RequestTime   time.Time
+	ResponseTime  time.Time
+	Duration      time.Duration
+	Decrypted     bool // 来自 TLS 解密还原（区分链路明文）
 }
 
 // SNMP 简单网络管理。
 type SNMP struct {
-	Version uint8 // 1=SNMPv1, 2=SNMPv2c, 3=SNMPv3
+	Version   uint8 // 1=SNMPv1, 2=SNMPv2c, 3=SNMPv3
 	Community string
-	PDUType uint8
+	PDUType   uint8
 }
 
 // RADIUS 远程认证拨入用户服务。
@@ -131,13 +131,13 @@ type RADIUS struct {
 
 // SIP 会话发起协议。
 type SIP struct {
-	Method    string // INVITE/REGISTER/BYE...
-	URI       string
+	Method     string // INVITE/REGISTER/BYE...
+	URI        string
 	StatusCode int
 	StatusText string
-	From      string
-	To        string
-	CallID    string
+	From       string
+	To         string
+	CallID     string
 }
 
 // SMB 服务消息块。
@@ -159,8 +159,8 @@ type MQTT struct {
 
 // SQL 数据库协议（MySQL/MSSQL/PostgreSQL 检测后填）。
 type SQL struct {
-	Dialect  string // mysql/mssql/postgres
-	Command  string
+	Dialect string // mysql/mssql/postgres
+	Command string
 }
 
 // Syslog 系统日志。
@@ -172,9 +172,9 @@ type Syslog struct {
 
 // NBNS NetBIOS 名称服务。
 type NBNS struct {
-	TID      uint16
+	TID        uint16
 	IsResponse bool
-	Question string
+	Question   string
 }
 
 // TFTP 简单文件传输。
@@ -192,10 +192,10 @@ type Telnet struct {
 
 // QUIC 快速 UDP 互联网连接。
 type QUIC struct {
-	Version      uint32
-	DCID         string // 目的连接 ID
-	SCID         string // 源连接 ID
-	IsInitial    bool
+	Version   uint32
+	DCID      string // 目的连接 ID
+	SCID      string // 源连接 ID
+	IsInitial bool
 }
 
 // ToPT Trusted Overlay Protocol Transport（保留位，等需要时再补全）。

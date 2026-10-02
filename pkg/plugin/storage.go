@@ -9,11 +9,11 @@ import "time"
 type CaptureRecord struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
-	Format      string    `json:"format"`     // pcapng/pcap/...
-	LinkType    int       `json:"link_type"`  // LINKTYPE_*
+	Format      string    `json:"format"`    // pcapng/pcap/...
+	LinkType    int       `json:"link_type"` // LINKTYPE_*
 	PacketCount int       `json:"packet_count"`
-	ByteSize    int64     `json:"byte_size"`  // 原始文件字节数
-	FilePath    string    `json:"file_path"`  // 原始 pcap 文件路径
+	ByteSize    int64     `json:"byte_size"` // 原始文件字节数
+	FilePath    string    `json:"file_path"` // 原始 pcap 文件路径
 	SHA256      string    `json:"sha256"`
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
@@ -25,16 +25,16 @@ type CaptureRecord struct {
 // 只存 L2/L3/L4 关键元数据与 INFO 摘要，不含原始字节。
 type PacketRecord struct {
 	CaptureID string    `json:"capture_id"`
-	No        int       `json:"no"`        // 包序号（从 1 开始）
-	Time      time.Time `json:"time"`      // 绝对时间
+	No        int       `json:"no"`   // 包序号（从 1 开始）
+	Time      time.Time `json:"time"` // 绝对时间
 	SrcIP     string    `json:"src_ip"`
 	DstIP     string    `json:"dst_ip"`
 	SrcPort   uint16    `json:"src_port"`
 	DstPort   uint16    `json:"dst_port"`
-	Proto     string    `json:"proto"`     // 协议名（TCP/UDP/DNS/HTTP/TLS...）
-	Info      string    `json:"info"`      // Wireshark 风格 INFO
-	CapLen    int       `json:"cap_len"`   // 抓取长度
-	OrigLen   int       `json:"orig_len"`  // 原始长度
+	Proto     string    `json:"proto"`    // 协议名（TCP/UDP/DNS/HTTP/TLS...）
+	Info      string    `json:"info"`     // Wireshark 风格 INFO
+	CapLen    int       `json:"cap_len"`  // 抓取长度
+	OrigLen   int       `json:"orig_len"` // 原始长度
 }
 
 // Page 分页参数。

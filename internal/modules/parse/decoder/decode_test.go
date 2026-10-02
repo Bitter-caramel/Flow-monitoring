@@ -15,7 +15,7 @@ import (
 
 func ethFrame(etherType uint16, payload []byte) []byte {
 	frame := make([]byte, 14+len(payload))
-	copy(frame[0:6], net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}) // dst
+	copy(frame[0:6], net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55})  // dst
 	copy(frame[6:12], net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}) // src
 	binary.BigEndian.PutUint16(frame[12:14], etherType)
 	copy(frame[14:], payload)
@@ -28,7 +28,7 @@ func ipv4Packet(proto uint8, srcIP, dstIP net.IP, payload []byte) []byte {
 	hdr[0] = 0x45 // version 4, IHL 5
 	binary.BigEndian.PutUint16(hdr[2:4], uint16(totalLen))
 	binary.BigEndian.PutUint16(hdr[4:6], 0x1234) // id
-	hdr[8] = 64                                   // ttl
+	hdr[8] = 64                                  // ttl
 	hdr[9] = proto
 	copy(hdr[12:16], srcIP.To4())
 	copy(hdr[16:20], dstIP.To4())
@@ -130,11 +130,11 @@ func TestDecode_EthernetIPv4UDP(t *testing.T) {
 // TestDecode_EthernetARP ARP 解码。
 func TestDecode_EthernetARP(t *testing.T) {
 	arp := make([]byte, 28)
-	binary.BigEndian.PutUint16(arp[0:2], 1)     // hw type Ethernet
+	binary.BigEndian.PutUint16(arp[0:2], 1)      // hw type Ethernet
 	binary.BigEndian.PutUint16(arp[2:4], 0x0800) // proto IPv4
-	arp[4] = 6                                    // hw len
-	arp[5] = 4                                    // proto len
-	binary.BigEndian.PutUint16(arp[6:8], 1)     // request
+	arp[4] = 6                                   // hw len
+	arp[5] = 4                                   // proto len
+	binary.BigEndian.PutUint16(arp[6:8], 1)      // request
 	copy(arp[8:14], net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff})
 	copy(arp[14:18], net.ParseIP("192.168.1.1").To4())
 	copy(arp[24:28], net.ParseIP("192.168.1.100").To4())

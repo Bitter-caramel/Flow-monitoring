@@ -3,6 +3,7 @@
   "name": "流量导入",
   "version": "1.0.0",
   "layer": "L2",
+  "enabled": true,
   "binary": "importer",
   "http_base": "/api/v1/captures/import",
   "provides": ["importer.api"]

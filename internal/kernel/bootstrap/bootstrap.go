@@ -1,11 +1,11 @@
 // Package bootstrap 是平台的总开机按钮（L0 内核）。
 //
 // 职责：读配置 → 建日志 → 起进程内基础设施（事件总线/存储/原始文件仓库）
-// → 起模块进程管理器与宿主桥接 → 读模块清单（内置 + 用户扩展）→ 起 HTTP 网关
+// → 起模块进程管理器与宿主桥接 → 读模块清单 → 起 HTTP 网关
 // → 按拓扑序启动模块进程 → ready。
 //
-// 关键设计（修正旧版）：内核不再 import 任何业务模块。模块清单来自
-// registry.DefaultModules()（内置）+ registry/backend-modules/*.json（用户扩展），
+// 关键设计（修正旧版）：内核不再 import 任何业务模块。模块清单完全来自
+// registry/backend-modules/*.json，每个文件用 enabled 字段声明自己是否参与装配；
 // 模块以独立进程运行，内核只通过 pkg/plugin 契约与它们通信。
 package bootstrap
 
@@ -78,7 +78,8 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 	}
 
 	// 模块清单：完全来自声明式注册表目录（registry/backend-modules/*.json）。
-	// 加/删/换模块 = 加/删/换一个 json + 一个二进制，内核代码零改动。
+	// 加/删/换模块 = 加/删/换一个 json + 一个二进制，内核代码零改动；
+	// 停用模块 = 把该 json 的 enabled 改成 false（仍留在目录里，可见可查）。
 	reg := registry.New()
 	if cfg.ManifestDir == "" {
 		logger.Warn("manifest_dir is empty, no module will be loaded")
@@ -92,7 +93,10 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 				return nil, fmt.Errorf("bootstrap: register module %s: %w", d.ID, err)
 			}
 		}
-		logger.Info("module registry loaded", "dir", cfg.ManifestDir, "modules", len(loaded.List()))
+		logger.Info("module registry loaded",
+			"dir", cfg.ManifestDir,
+			"declared", len(loaded.List()),
+			"enabled", len(loaded.ListEnabled()))
 	}
 
 	h := health.New(mgr)

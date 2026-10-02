@@ -22,9 +22,10 @@ const rpcServiceName = "Plugin"
 // 宿主通过 ModulePlugin 拿到一个客户端代理（moduleRPCClient）远程调用。
 //
 // 生命周期（由宿主按依赖拓扑序驱动）：
-//   Start：模块读取配置快照、监听 FLOW_MODULE_HTTP_ADDR、开始干活
-//   Stop：模块优雅关闭（幂等）
-//   Health：宿主定期探活；不健康时宿主可重启该进程
+//
+//	Start：模块读取配置快照、监听 FLOW_MODULE_HTTP_ADDR、开始干活
+//	Stop：模块优雅关闭（幂等）
+//	Health：宿主定期探活；不健康时宿主可重启该进程
 type Module interface {
 	Manifest() Manifest
 	Start() error

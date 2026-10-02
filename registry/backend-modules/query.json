@@ -3,6 +3,7 @@
   "name": "查询服务",
   "version": "1.0.0",
   "layer": "L2",
+  "enabled": true,
   "binary": "query",
   "http_base": "/api/v1/captures",
   "provides": ["query.api"]

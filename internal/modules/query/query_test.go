@@ -75,7 +75,9 @@ func (s *memPacketStore) ListByCapture(_ context.Context, id string, page storag
 	}
 	return &storage.PageResult[storage.PacketRecord]{Items: all[start:end], Total: len(all)}, nil
 }
-func (s *memPacketStore) Count(_ context.Context, id string) (int, error) { return len(s.m.packets[id]), nil }
+func (s *memPacketStore) Count(_ context.Context, id string) (int, error) {
+	return len(s.m.packets[id]), nil
+}
 func (s *memPacketStore) DeleteByCapture(_ context.Context, id string) error {
 	delete(s.m.packets, id)
 	return nil
