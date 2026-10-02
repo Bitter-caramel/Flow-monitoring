@@ -38,6 +38,3 @@ config.local.yaml
 config.local.json
 .env
 .env.local
-
-#data文件夹，开发过程中的数据文件夹
-data/
