@@ -39,11 +39,21 @@ type Analyzer struct {
 	flows  map[key]*datamodel.Flow // 五元组 -> Flow
 	order  []*datamodel.Flow       // 按创建顺序保存，保证 Flows() 输出稳定
 	nextID uint64                  // 自增 flow ID（从 1 开始）
+
+	// 三类统计（见 stats.go）：随 Feed 增量维护。
+	protoStats    map[string]ProtoStat         // 协议名 -> 统计
+	endpointStats map[EndpointKey]EndpointStat // 规范化 IP 对 -> 统计
+	portStats     map[uint16]uint64            // 端口 -> 包数
 }
 
 // New 构造一个空的流聚合器。
 func New() *Analyzer {
-	return &Analyzer{flows: make(map[key]*datamodel.Flow)}
+	return &Analyzer{
+		flows:         make(map[key]*datamodel.Flow),
+		protoStats:    make(map[string]ProtoStat),
+		endpointStats: make(map[EndpointKey]EndpointStat),
+		portStats:     make(map[uint16]uint64),
+	}
 }
 
 // Feed 把一个解码后的包喂给聚合器。
@@ -132,6 +142,9 @@ func (a *Analyzer) Feed(p *datamodel.Packet) {
 	if k.Proto == 6 {
 		advanceTCPState(f, p, dir)
 	}
+
+	// 三类统计：协议/端点/端口（放在流聚合与状态机之后增量维护）。
+	a.updateStats(p, k)
 
 	// 回写流归属，供下游（存储/查询/展示）消费。
 	p.StreamID = int(f.ID)
