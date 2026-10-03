@@ -35,6 +35,7 @@ type Flow struct {
 	SynNo           int           // SYN 包号
 	SynAckNo        int           // SYN-ACK 包号
 	RstNo           int           // RST 包号
+	FinDirs         uint8         // FIN 方向位掩码（bit0=A→B, bit1=B→A）
 	Swap            bool          // 流是否被规范化方向调换过
 
 	// 应用层识别
