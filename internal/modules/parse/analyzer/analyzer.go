@@ -13,8 +13,8 @@
 //	}
 //	flows := a.Flows()
 //
-// 本包只做流级统计（包/字节/首末时间/双向计数），不做 L7 语义、TCP 状态机
-// 或存储落盘，保持"流级轻量"的定位。
+// 本包做流级统计（包/字节/首末时间/双向计数）与 TCP 状态机（见 tcp.go），
+// 不做 L7 语义或存储落盘，保持"流级轻量"的定位。
 package analyzer
 
 import (
@@ -102,6 +102,7 @@ func (a *Analyzer) Feed(p *datamodel.Packet) {
 			BPort:    k.BPort,
 			Protocol: k.Proto,
 			Swap:     swap,
+			State:    datamodel.FlowUnknown,
 		}
 		if k.Proto == 6 {
 			f.Kind = "tcp"
@@ -126,6 +127,11 @@ func (a *Analyzer) Feed(p *datamodel.Packet) {
 	f.Dirs[dir].Packets++
 	f.Dirs[dir].Bytes += uint64(p.CapLen)
 	f.Dirs[dir].DataBytes += uint64(p.PayloadLen)
+
+	// TCP 状态机：仅对 TCP 包推进状态，UDP 包跳过。
+	if k.Proto == 6 {
+		advanceTCPState(f, p, dir)
+	}
 
 	// 回写流归属，供下游（存储/查询/展示）消费。
 	p.StreamID = int(f.ID)
