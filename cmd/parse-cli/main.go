@@ -5,28 +5,42 @@
 //
 // 用法：
 //
-//	parse-cli <file.pcapng> [--limit N]
+//	parse-cli <file.pcapng> [--limit N] [--analyze] [--top N]
 //
 // 输出列：No / 时间 / 源 → 目的 / 协议 / 长度 / INFO
+// 开启 --analyze 后不再逐包打印，改为输出流聚合/协议/端点/端口四段统计。
 package main
 
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
+	"sort"
 
 	"flow-monitoring/internal/kernel/datamodel"
+	"flow-monitoring/internal/modules/parse/analyzer"
 	"flow-monitoring/internal/modules/parse/decoder"
 	"flow-monitoring/internal/modules/parse/pcapng"
 )
 
 func main() {
 	limit := flag.Int("limit", 0, "最大解析包数（0=不限制）")
+	analyze := flag.Bool("analyze", false, "启用流聚合分析（不逐包打印）")
+	top := flag.Int("top", 10, "排行榜显示条数")
 	flag.Parse()
 
+	// Go 的 flag 包默认在首个位置参数（文件名）处停止解析，
+	// 因此把文件名之后的剩余参数再解析一次，
+	// 以兼容 `parse-cli <file> --analyze` 这种"文件在前"的用法。
 	args := flag.Args()
+	if len(args) > 1 {
+		_ = flag.CommandLine.Parse(args[1:])
+		args = args[:1]
+	}
+
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "用法: parse-cli <file.pcapng> [--limit N]")
+		fmt.Fprintln(os.Stderr, "用法: parse-cli <file.pcapng> [--limit N] [--analyze] [--top N]")
 		os.Exit(1)
 	}
 	path := args[0]
@@ -56,10 +70,17 @@ func main() {
 	}
 	fmt.Println()
 
-	// 表头
-	fmt.Printf("%-6s %-18s %-21s %-21s %-9s %-6s %s\n",
-		"No.", "Time", "Source", "Destination", "Protocol", "Length", "Info")
-	fmt.Println("----------------------------------------------------------------------------------------------")
+	// 表头（仅在逐包模式下打印）。
+	if !*analyze {
+		fmt.Printf("%-6s %-18s %-21s %-21s %-9s %-6s %s\n",
+			"No.", "Time", "Source", "Destination", "Protocol", "Length", "Info")
+		fmt.Println("----------------------------------------------------------------------------------------------")
+	}
+
+	var a *analyzer.Analyzer
+	if *analyze {
+		a = analyzer.New()
+	}
 
 	for _, p := range cap.Packets {
 		linkType := cap.LinkType
@@ -67,6 +88,12 @@ func main() {
 			linkType = cap.Ifaces[p.Iface].LinkType
 		}
 		decoder.Decode(p, linkType)
+
+		if a != nil {
+			// Feed 必须在 Decode 之后：它读取解码后的字段。
+			a.Feed(p)
+			continue
+		}
 
 		src := formatEndpoint(p)
 		dst := formatDstEndpoint(p)
@@ -78,6 +105,136 @@ func main() {
 
 		fmt.Printf("%-6d %-18s %-21s %-21s %-9s %-6d %s\n",
 			p.No, formatTime(p), src, dst, proto, length, p.Info)
+	}
+
+	if a != nil {
+		printAnalysis(a, *top)
+	}
+}
+
+// printAnalysis 打印聚合分析结果：流聚合/协议/端点/端口四段。
+func printAnalysis(a *analyzer.Analyzer, top int) {
+	if top < 0 {
+		top = 0
+	}
+
+	// a) 流聚合：按字节数降序，最多显示 top 条。
+	flows := a.Flows()
+	sort.SliceStable(flows, func(i, j int) bool {
+		if flows[i].ByteCnt != flows[j].ByteCnt {
+			return flows[i].ByteCnt > flows[j].ByteCnt
+		}
+		return flows[i].ID < flows[j].ID
+	})
+	flowShow := len(flows)
+	if flowShow > top {
+		flowShow = top
+	}
+	fmt.Printf("=== 流聚合（共 %d 条，显示前 %d 条）：===\n", len(flows), flowShow)
+	for i := 0; i < flowShow; i++ {
+		f := flows[i]
+		fmt.Printf("%d) %s:%d 到 %s:%d  Kind=%s  PacketCnt=%d  ByteCnt=%d  State=%s  Dirs[0](A→B) 包数=%d 字节数=%d  Dirs[1](B→A) 包数=%d 字节数=%d\n",
+			i+1, ip4String(f.A), f.APort, ip4String(f.B), f.BPort,
+			f.Kind, f.PacketCnt, f.ByteCnt, flowStateName(f.State),
+			f.Dirs[0].Packets, f.Dirs[0].Bytes, f.Dirs[1].Packets, f.Dirs[1].Bytes)
+	}
+	fmt.Println()
+
+	// b) 协议统计：按包数降序（全部）。
+	stats := a.Stats()
+	protoNames := make([]string, 0, len(stats.Protocols))
+	for name := range stats.Protocols {
+		protoNames = append(protoNames, name)
+	}
+	sort.Slice(protoNames, func(i, j int) bool {
+		pi := stats.Protocols[protoNames[i]]
+		pj := stats.Protocols[protoNames[j]]
+		if pi.Packets != pj.Packets {
+			return pi.Packets > pj.Packets
+		}
+		return protoNames[i] < protoNames[j]
+	})
+	fmt.Printf("=== 协议统计（共 %d 种，按包数降序）：===\n", len(protoNames))
+	for _, name := range protoNames {
+		st := stats.Protocols[name]
+		label := name
+		if label == "" {
+			label = "?"
+		}
+		fmt.Printf("%s  包数=%d  字节数=%d\n", label, st.Packets, st.Bytes)
+	}
+	fmt.Println()
+
+	// c) 端点 TOP N（按字节数）。
+	endpoints := make([]analyzer.EndpointStat, 0, len(stats.Endpoints))
+	for _, st := range stats.Endpoints {
+		endpoints = append(endpoints, st)
+	}
+	sort.Slice(endpoints, func(i, j int) bool {
+		if endpoints[i].Bytes != endpoints[j].Bytes {
+			return endpoints[i].Bytes > endpoints[j].Bytes
+		}
+		if endpoints[i].A != endpoints[j].A {
+			return endpoints[i].A < endpoints[j].A
+		}
+		return endpoints[i].B < endpoints[j].B
+	})
+	endpointShow := len(endpoints)
+	if endpointShow > top {
+		endpointShow = top
+	}
+	fmt.Printf("=== 端点 TOP %d（按字节数，共 %d 对）：===\n", endpointShow, len(endpoints))
+	for i := 0; i < endpointShow; i++ {
+		e := endpoints[i]
+		fmt.Printf("%d) %s 到 %s  字节数=%d  包数=%d\n",
+			i+1, ip4String(e.A), ip4String(e.B), e.Bytes, e.Packets)
+	}
+	fmt.Println()
+
+	// d) 端口 TOP N（按包数）。
+	type portEntry struct {
+		Port    uint16
+		Packets uint64
+	}
+	ports := make([]portEntry, 0, len(stats.Ports))
+	for port, cnt := range stats.Ports {
+		ports = append(ports, portEntry{Port: port, Packets: cnt})
+	}
+	sort.Slice(ports, func(i, j int) bool {
+		if ports[i].Packets != ports[j].Packets {
+			return ports[i].Packets > ports[j].Packets
+		}
+		return ports[i].Port < ports[j].Port
+	})
+	portShow := len(ports)
+	if portShow > top {
+		portShow = top
+	}
+	fmt.Printf("=== 端口 TOP %d（按包数，共 %d 个）：===\n", portShow, len(ports))
+	for i := 0; i < portShow; i++ {
+		fmt.Printf("%d) 端口 %d  包数=%d\n", i+1, ports[i].Port, ports[i].Packets)
+	}
+	fmt.Println("=== 分析结束 ===")
+}
+
+// ip4String 把 IPv4 的 uint32 整数转换为点分十进制字符串。
+func ip4String(v uint32) string {
+	return net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v)).String()
+}
+
+// flowStateName 把 FlowState 转成可读名字。
+func flowStateName(s datamodel.FlowState) string {
+	switch s {
+	case datamodel.FlowEstablished:
+		return "ESTABLISHED"
+	case datamodel.FlowHalfClose:
+		return "HALF_CLOSE"
+	case datamodel.FlowClosed:
+		return "CLOSED"
+	case datamodel.FlowReset:
+		return "RESET"
+	default:
+		return "UNKNOWN"
 	}
 }
 
