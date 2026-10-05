@@ -1,0 +1,372 @@
+{
+  "rules": [
+    {
+      "id": "suricata-2100498",
+      "source": "suricata",
+      "source_id": "2100498",
+      "name": "ET SQLi",
+      "category": "web",
+      "severity": "high",
+      "enabled": true,
+      "match": {
+        "proto": "tcp",
+        "src_ip": "negate=false nets=[$HOME_NET]",
+        "dst_ip": "negate=false nets=[$EXTERNAL_NET]",
+        "src_port": "any",
+        "dst_port": "ports=[80] ranges=[]",
+        "flow": "established",
+        "conditions": [
+          {
+            "kind": "content",
+            "buffer": "payload",
+            "value": "union select",
+            "flags": 1,
+            "offset": 0,
+            "depth": 0
+          },
+          {
+            "kind": "content",
+            "buffer": "http_uri",
+            "value": "/admin",
+            "flags": 0,
+            "offset": 0,
+            "depth": 0
+          },
+          {
+            "kind": "pcre",
+            "buffer": "http_uri",
+            "value": "/union\\s+select/i",
+            "flags": 0,
+            "offset": 0,
+            "depth": 0
+          }
+        ]
+      },
+      "action_kind": "web-application-attack",
+      "action_severity": "high",
+      "weight": 80,
+      "confidence": 1,
+      "any_port": false,
+      "ports": [
+        80
+      ],
+      "port_ranges": [],
+      "matchers": [
+        {
+          "kind": "content",
+          "buffer": "payload",
+          "content": "union select",
+          "lower": "union select",
+          "regex": "",
+          "nocase": true,
+          "negate": false,
+          "fast_pattern": false,
+          "offset": 0,
+          "depth": 0
+        },
+        {
+          "kind": "content",
+          "buffer": "http_uri",
+          "content": "/admin",
+          "lower": "",
+          "regex": "",
+          "nocase": false,
+          "negate": false,
+          "fast_pattern": false,
+          "offset": 0,
+          "depth": 0
+        },
+        {
+          "kind": "pcre",
+          "buffer": "http_uri",
+          "content": "/union\\s+select/i",
+          "lower": "",
+          "regex": "(?i)union\\s+select",
+          "nocase": false,
+          "negate": false,
+          "fast_pattern": false,
+          "offset": 0,
+          "depth": 0
+        }
+      ],
+      "unsupported": []
+    },
+    {
+      "id": "suricata-1000001",
+      "source": "suricata",
+      "source_id": "1000001",
+      "name": "扫描器指纹",
+      "category": "scanner",
+      "severity": "medium",
+      "enabled": true,
+      "match": {
+        "proto": "http",
+        "src_ip": "negate=false nets=[]",
+        "dst_ip": "negate=false nets=[]",
+        "src_port": "any",
+        "dst_port": "any",
+        "flow": "stateless",
+        "conditions": [
+          {
+            "kind": "content",
+            "buffer": "http_header",
+            "value": "nuclei",
+            "flags": 1,
+            "offset": 0,
+            "depth": 0
+          }
+        ]
+      },
+      "action_kind": "attempted-recon",
+      "action_severity": "medium",
+      "weight": 50,
+      "confidence": 1,
+      "any_port": true,
+      "ports": [],
+      "port_ranges": [],
+      "matchers": [
+        {
+          "kind": "content",
+          "buffer": "http_header",
+          "content": "nuclei",
+          "lower": "nuclei",
+          "regex": "",
+          "nocase": true,
+          "negate": false,
+          "fast_pattern": false,
+          "offset": 0,
+          "depth": 0
+        }
+      ],
+      "unsupported": []
+    },
+    {
+      "id": "suricata-1000002",
+      "source": "suricata",
+      "source_id": "1000002",
+      "name": "DNS 特征",
+      "category": "c2",
+      "severity": "high",
+      "enabled": true,
+      "match": {
+        "proto": "udp",
+        "src_ip": "negate=false nets=[]",
+        "dst_ip": "negate=false nets=[]",
+        "src_port": "any",
+        "dst_port": "ports=[53] ranges=[]",
+        "flow": "",
+        "conditions": [
+          {
+            "kind": "content",
+            "buffer": "dns_query",
+            "value": "evil.example",
+            "flags": 0,
+            "offset": 0,
+            "depth": 0
+          }
+        ]
+      },
+      "action_kind": "trojan-activity",
+      "action_severity": "high",
+      "weight": 80,
+      "confidence": 1,
+      "any_port": false,
+      "ports": [
+        53
+      ],
+      "port_ranges": [],
+      "matchers": [
+        {
+          "kind": "content",
+          "buffer": "dns_query",
+          "content": "evil.example",
+          "lower": "",
+          "regex": "",
+          "nocase": false,
+          "negate": false,
+          "fast_pattern": false,
+          "offset": 0,
+          "depth": 0
+        }
+      ],
+      "unsupported": []
+    },
+    {
+      "id": "suricata-1000003",
+      "source": "suricata",
+      "source_id": "1000003",
+      "name": "出站异常端口",
+      "category": "unknown",
+      "severity": "medium",
+      "enabled": true,
+      "match": {
+        "proto": "tcp",
+        "src_ip": "negate=false nets=[10.0.0.0/8,192.168.0.0/16]",
+        "dst_ip": "negate=false nets=[$EXTERNAL_NET]",
+        "src_port": "ports=[] ranges=[1024-65535]",
+        "dst_port": "ports=[] ranges=[8080-8090]",
+        "flow": "to_server",
+        "conditions": [
+          {
+            "kind": "content",
+            "buffer": "payload",
+            "value": "GET ",
+            "flags": 0,
+            "offset": 0,
+            "depth": 4
+          }
+        ]
+      },
+      "action_kind": "suricata_alert",
+      "action_severity": "medium",
+      "weight": 50,
+      "confidence": 1,
+      "any_port": false,
+      "ports": [],
+      "port_ranges": [
+        "1024-65535",
+        "8080-8090"
+      ],
+      "matchers": [
+        {
+          "kind": "content",
+          "buffer": "payload",
+          "content": "GET ",
+          "lower": "",
+          "regex": "",
+          "nocase": false,
+          "negate": false,
+          "fast_pattern": false,
+          "offset": 0,
+          "depth": 4
+        }
+      ],
+      "unsupported": []
+    },
+    {
+      "id": "suricata-1000004",
+      "source": "suricata",
+      "source_id": "1000004",
+      "name": "不支持的关键字示例",
+      "category": "unknown",
+      "severity": "medium",
+      "enabled": true,
+      "match": {
+        "proto": "tcp",
+        "src_ip": "negate=false nets=[]",
+        "dst_ip": "negate=false nets=[]",
+        "src_port": "any",
+        "dst_port": "ports=[445] ranges=[]",
+        "flow": "",
+        "conditions": [
+          {
+            "kind": "content",
+            "buffer": "payload",
+            "value": "SMB",
+            "flags": 0,
+            "offset": 0,
+            "depth": 0
+          }
+        ]
+      },
+      "action_kind": "suricata_alert",
+      "action_severity": "medium",
+      "weight": 50,
+      "confidence": 1,
+      "any_port": false,
+      "ports": [
+        445
+      ],
+      "port_ranges": [],
+      "matchers": [
+        {
+          "kind": "content",
+          "buffer": "payload",
+          "content": "SMB",
+          "lower": "",
+          "regex": "",
+          "nocase": false,
+          "negate": false,
+          "fast_pattern": false,
+          "offset": 0,
+          "depth": 0
+        }
+      ],
+      "unsupported": []
+    },
+    {
+      "id": "suricata-1000005",
+      "source": "suricata",
+      "source_id": "1000005",
+      "name": "RE2 不支持的正则",
+      "category": "unknown",
+      "severity": "medium",
+      "enabled": true,
+      "match": {
+        "proto": "tcp",
+        "src_ip": "negate=false nets=[]",
+        "dst_ip": "negate=false nets=[]",
+        "src_port": "any",
+        "dst_port": "ports=[8080] ranges=[]",
+        "flow": "",
+        "conditions": [
+          {
+            "kind": "content",
+            "buffer": "payload",
+            "value": "ok",
+            "flags": 0,
+            "offset": 0,
+            "depth": 0
+          },
+          {
+            "kind": "pcre",
+            "buffer": "payload",
+            "value": "/(?=x)y/",
+            "flags": 0,
+            "offset": 0,
+            "depth": 0
+          }
+        ]
+      },
+      "action_kind": "suricata_alert",
+      "action_severity": "medium",
+      "weight": 50,
+      "confidence": 1,
+      "any_port": false,
+      "ports": [
+        8080
+      ],
+      "port_ranges": [],
+      "matchers": [
+        {
+          "kind": "content",
+          "buffer": "payload",
+          "content": "ok",
+          "lower": "",
+          "regex": "",
+          "nocase": false,
+          "negate": false,
+          "fast_pattern": false,
+          "offset": 0,
+          "depth": 0
+        }
+      ],
+      "unsupported": [
+        "pcre 不支持: /(?=x)y/"
+      ]
+    }
+  ],
+  "lex_errors": [
+    "line 8: suricata: 第 8 行规则解析失败: 规则头字段数应为 7，实际为 8",
+    "line 9: suricata: 第 9 行规则解析失败: suricata: option \"sid\": strconv.Atoi: parsing \"notanumber\": invalid syntax"
+  ],
+  "compile_errors": [],
+  "total": 8,
+  "compiled": 6,
+  "failed": 2,
+  "unsupported": [
+    "flowbits x1",
+    "pcre 不支持: /(?=x)y/ x1",
+    "tag x1"
+  ]
+}

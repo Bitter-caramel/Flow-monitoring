@@ -1,0 +1,9 @@
+# Golden 测试用固定规则集（覆盖 P0 特性）
+alert tcp $HOME_NET any -> $EXTERNAL_NET 80 (msg:"ET SQLi"; flow:to_server,established; content:"union select"; nocase; http_uri; content:"/admin"; pcre:"/union\s+select/i"; sid:2100498; rev:3; classtype:web-application-attack; reference:cve,2021-1234;)
+alert http any any -> any any (msg:"扫描器指纹"; flow:stateless; http_header; content:"nuclei"; nocase; sid:1000001; rev:1; classtype:attempted-recon;)
+alert udp any any -> any 53 (msg:"DNS 特征"; dns_query; content:"evil.example"; sid:1000002; rev:2; classtype:trojan-activity;)
+alert tcp [10.0.0.0/8,192.168.0.0/16] 1024:65535 -> $EXTERNAL_NET 8080:8090 (msg:"出站异常端口"; flow:from_client; content:"GET "; depth:4; offset:0; sid:1000003; rev:1;)
+alert tcp any any -> any 445 (msg:"不支持的关键字示例"; flowbits:isset,foo; tag:session,5,packets; content:"SMB"; sid:1000004; rev:1;)
+alert tcp any any -> any 8080 (msg:"RE2 不支持的正则"; content:"ok"; pcre:"/(?=x)y/"; sid:1000005; rev:1;)
+this line is intentionally not a valid rule
+alert tcp any any -> any 80 (msg:"配置错误示例"; sid:notanumber;)
