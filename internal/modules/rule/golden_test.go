@@ -102,8 +102,10 @@ func TestGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
 	}
-	if string(want) != string(out) {
-		t.Errorf("golden mismatch\n--- want (golden) ---\n%s\n--- got (generate) ---\n%s", truncate4000(string(want)), truncate4000(string(out)))
+	// Windows 检出会把 golden 转成 CRLF，所以比较前必须归一化行尾。
+	wantNorm := strings.ReplaceAll(string(want), "\r\n", "\n")
+	if wantNorm != string(out) {
+		t.Errorf("golden mismatch\n--- want (golden) ---\n%s\n--- got (generate) ---\n%s", truncate4000(wantNorm), truncate4000(string(out)))
 	}
 }
 

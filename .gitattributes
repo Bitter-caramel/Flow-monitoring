@@ -2,3 +2,4 @@
 *.go text eol=lf
 *.mod text eol=lf
 *.sum text eol=lf
+internal/modules/rule/testdata/** text eol=lf
