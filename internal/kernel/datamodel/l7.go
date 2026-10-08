@@ -113,6 +113,16 @@ type HTTP struct {
 	ResponseTime  time.Time
 	Duration      time.Duration
 	Decrypted     bool // 来自 TLS 解密还原（区分链路明文）
+
+	// 以下数字均为"相对本包应用层载荷"的偏移/长度，仅记录数字、不保存 []byte，
+	// 避免 L7 结构绑定抓包缓冲区的生命周期（实时抓包缓冲区会被复用，切片会读到脏数据）。
+	// 检测引擎将来用 pkt.Data 按这些偏移现切出 http_header / http_client_body 缓冲区。
+	HeaderLen int // HTTP 头段长度（含结尾的 \r\n\r\n）；0 = 未知
+	BodyOff   int // 正文相对载荷的起始偏移；0 = 未知（头长 > 0 时正文也可能为空）
+	URIOff    int // 请求行中 URI 相对载荷的起始偏移；0 = 未知（响应没有 URI）
+	URILen    int // URI 长度
+	MethodOff int // 请求行中 Method 相对载荷的起始偏移；0 = 未知（响应没有 Method）
+	MethodLen int // Method 长度
 }
 
 // SNMP 简单网络管理。

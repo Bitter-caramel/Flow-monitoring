@@ -164,6 +164,99 @@ func TestHTTP_Response(t *testing.T) {
 	}
 }
 
+// TestHTTP_ByteBounds 验证 HTTP 解析器新增的字节边界数字：
+// 按 HeaderLen/BodyOff/URIOff/URILen/MethodOff/MethodLen 从载荷切出的字节，
+// 必须与原始报文的头段、正文、URI、Method 逐字节一致；并覆盖无 \r\n\r\n 的
+// 截断头（HeaderLen=载荷长度且 <=4096、BodyOff=0）与响应分支（URI/Method 字段为 0）。
+func TestHTTP_ByteBounds(t *testing.T) {
+	// (a) 带若干头 + 正文的 POST 请求。
+	head := "POST /submit?q=1 HTTP/1.1\r\n" +
+		"Host: example.com\r\n" +
+		"Content-Type: text/plain\r\n" +
+		"Content-Length: 14\r\n" +
+		"\r\n"
+	body := "hello-body-123" // 14 字节，与 Content-Length 一致
+	p := newL7Packet(6, 12345, 80, []byte(head+body))
+	Dispatch(p)
+	if p.HTTP == nil {
+		t.Fatal("HTTP should not be nil")
+	}
+	h := p.HTTP
+
+	if h.HeaderLen != len(head) {
+		t.Errorf("HeaderLen = %d, want %d", h.HeaderLen, len(head))
+	}
+	if got := string(p.Data[:h.HeaderLen]); got != head {
+		t.Errorf("按 HeaderLen 切出的头段 = %q, want %q", got, head)
+	}
+	if h.BodyOff != len(head) {
+		t.Errorf("BodyOff = %d, want %d", h.BodyOff, len(head))
+	}
+	if got := string(p.Data[h.BodyOff:]); got != body {
+		t.Errorf("从 BodyOff 起的正文 = %q, want %q", got, body)
+	}
+	if h.MethodOff != 0 {
+		t.Errorf("MethodOff = %d, want 0", h.MethodOff)
+	}
+	if h.MethodLen != len("POST") {
+		t.Errorf("MethodLen = %d, want %d", h.MethodLen, len("POST"))
+	}
+	if got := string(p.Data[h.MethodOff : h.MethodOff+h.MethodLen]); got != "POST" {
+		t.Errorf("按 MethodOff/MethodLen 切出的 Method = %q, want POST", got)
+	}
+	uri := "/submit?q=1"
+	if h.URILen != len(uri) {
+		t.Errorf("URILen = %d, want %d", h.URILen, len(uri))
+	}
+	if h.URIOff != len("POST")+1 {
+		t.Errorf("URIOff = %d, want %d", h.URIOff, len("POST")+1)
+	}
+	if got := string(p.Data[h.URIOff : h.URIOff+h.URILen]); got != uri {
+		t.Errorf("按 URIOff/URILen 切出的 URI = %q, want %q", got, uri)
+	}
+
+	// (b) 找不到 \r\n\r\n 的截断头（只有请求行 + 一个头，无空行）。
+	trunc := "GET /truncated HTTP/1.1\r\nHost: example.com"
+	p2 := newL7Packet(6, 12345, 80, []byte(trunc))
+	Dispatch(p2)
+	if p2.HTTP == nil {
+		t.Fatal("HTTP should not be nil")
+	}
+	h2 := p2.HTTP
+	if h2.HeaderLen != len(trunc) {
+		t.Errorf("截断头 HeaderLen = %d, want %d", h2.HeaderLen, len(trunc))
+	}
+	if h2.HeaderLen > 4096 {
+		t.Errorf("截断头 HeaderLen = %d, want <= 4096", h2.HeaderLen)
+	}
+	if h2.BodyOff != 0 {
+		t.Errorf("截断头 BodyOff = %d, want 0", h2.BodyOff)
+	}
+
+	// (c) 响应报文：HeaderLen 正常（含到 \r\n\r\n 为止），
+	// URI/Method 相关字段全为 0（走响应分支）。
+	respHead := "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+	p3 := newL7Packet(6, 80, 12345, []byte(respHead))
+	Dispatch(p3)
+	if p3.HTTP == nil {
+		t.Fatal("HTTP should not be nil")
+	}
+	h3 := p3.HTTP
+	if h3.HeaderLen != len(respHead) {
+		t.Errorf("响应 HeaderLen = %d, want %d", h3.HeaderLen, len(respHead))
+	}
+	if got := string(p3.Data[:h3.HeaderLen]); got != respHead {
+		t.Errorf("响应按 HeaderLen 切出的头段 = %q, want %q", got, respHead)
+	}
+	if h3.BodyOff != len(respHead) {
+		t.Errorf("响应 BodyOff = %d, want %d", h3.BodyOff, len(respHead))
+	}
+	if h3.URIOff != 0 || h3.URILen != 0 || h3.MethodOff != 0 || h3.MethodLen != 0 {
+		t.Errorf("响应 URI/Method 边界应全为 0, got URIOff=%d URILen=%d MethodOff=%d MethodLen=%d",
+			h3.URIOff, h3.URILen, h3.MethodOff, h3.MethodLen)
+	}
+}
+
 // TestTLS_ClientHelloSNI 提取 ClientHello SNI。
 func TestTLS_ClientHelloSNI(t *testing.T) {
 	// 构造 ClientHello body
