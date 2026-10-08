@@ -1,4 +1,4 @@
-package rule
+package pipeline
 
 import (
 	"encoding/json"
@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"flow-monitoring/internal/modules/rule"
 )
 
 var update = flag.Bool("update", false, "更新 golden 快照")
@@ -139,7 +141,7 @@ func buildGolden(tr *TranslateResult) goldenFile {
 	return gf
 }
 
-func buildRule(cr *CompiledRule) goldenRule {
+func buildRule(cr *rule.CompiledRule) goldenRule {
 	r := cr.Rule
 	gr := goldenRule{
 		ID:             r.ID,
@@ -171,7 +173,7 @@ func buildRule(cr *CompiledRule) goldenRule {
 	return gr
 }
 
-func buildMatch(m Match) goldenMatch {
+func buildMatch(m rule.Match) goldenMatch {
 	gm := goldenMatch{
 		Proto:      string(m.Proto),
 		SrcIP:      buildNet(m.SrcIP),
@@ -194,7 +196,7 @@ func buildMatch(m Match) goldenMatch {
 	return gm
 }
 
-func buildMatcher(m Matcher) goldenMatcher {
+func buildMatcher(m rule.Matcher) goldenMatcher {
 	rgx := ""
 	if m.Regex != nil {
 		rgx = m.Regex.String()
@@ -213,11 +215,11 @@ func buildMatcher(m Matcher) goldenMatcher {
 	}
 }
 
-func buildNet(n NetSpec) string {
+func buildNet(n rule.NetSpec) string {
 	return "negate=" + strconv.FormatBool(n.Negate) + " nets=[" + strings.Join(n.Networks, ",") + "]"
 }
 
-func buildPort(p PortSpec) string {
+func buildPort(p rule.PortSpec) string {
 	if p.Any {
 		return "any"
 	}
