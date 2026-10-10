@@ -82,3 +82,4 @@ go run ./cmd/parse-cli testdata/test.pcapng
 | [`docs/定制化与检测规划.md`](docs/定制化与检测规划.md) | 资产/规则数据模型、检测架构、事件线、部署形态、自研 vs 复用红线 |
 | [`docs/规则翻译器.md`](docs/规则翻译器.md) | Suricata 规则导入的微型架构（三层 + IR） |
 | [`docs/规则翻译器扩展指南.md`](docs/规则翻译器扩展指南.md) | 加关键字的改动地图 + 插件化搬家蓝图 |
+| [`docs/检测引擎.md`](docs/检测引擎.md) | 检测引擎设计：`Ctx` / 缓冲区提取器 / 匹配语义 / 两次编译 / 性能红线 / P0 边界 |
