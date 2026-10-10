@@ -1,0 +1,8 @@
+# 9-4b 测试夹具：小而全的规则集
+alert tcp any any -> any 80 (msg:"normal-sqli"; content:"union select"; nocase; http_uri; sid:100001; rev:1;)
+alert udp any any -> any 53 (msg:"normal-dns"; content:"evil.example"; dns_query; sid:100002; rev:1;)
+alert tcp any any -> any 80 (msg:"unknown-buffer-keyword"; content:"x"; http_stat_code; sid:100003;)
+alert tcp any any -> any 80 (msg:"unknown-keyword"; flowbits:isset,foo; content:"y"; sid:100004;)
+this line is garbage
+alert tcp any any -> any 80 (msg:"bad-sid"; sid:notanumber;)
+alert tcp any any -> any 80 (msg:"flow-direction"; flow:to_server; content:"z"; sid:100005;)

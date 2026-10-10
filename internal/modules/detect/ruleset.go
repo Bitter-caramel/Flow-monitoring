@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"flow-monitoring/internal/modules/rule"
 	"flow-monitoring/internal/modules/rule/pipeline"
 )
 
@@ -144,21 +145,9 @@ func LoadText(text string) *RuleSet {
 	}
 
 	// ---- 逐条编译 ----
-	progs := make([]*Program, 0, len(res.Rules))
-	for _, cr := range res.Rules {
-		p, err := Compile(cr)
-		if err == nil {
-			progs = append(progs, p)
-			continue
-		}
-		if errors.Is(err, ErrUnsupportedBuffer) {
-			// 引擎明确不支持该缓冲区：这条规则不会生效，剔除并记录原因。
-			report.DroppedRules = append(report.DroppedRules, fmt.Sprintf("%s: %s", cr.ID, err))
-			continue
-		}
-		// 其它错误才算真正的编译失败。
-		report.CompileErrs = append(report.CompileErrs, err.Error())
-	}
+	progs, dropped, compileErrs := compileRules(res.Rules)
+	report.DroppedRules = append(report.DroppedRules, dropped...)
+	report.CompileErrs = append(report.CompileErrs, compileErrs...)
 
 	// ---- 不支持项汇总：先渲染成 "说明 xN"，再按“次数降序、说明字典序”排序 ----
 	type unsupportedEntry struct {
@@ -206,4 +195,25 @@ func LoadFile(path string) (*RuleSet, error) {
 		return nil, err
 	}
 	return LoadText(string(data)), nil
+}
+
+// compileRules 逐条编译规则。
+// 返回：成功编译的程序、因引用引擎不支持的缓冲区而被剔除的明细、其它编译错误。
+func compileRules(rules []*rule.CompiledRule) (progs []*Program, dropped []string, compileErrs []string) {
+	progs = make([]*Program, 0, len(rules))
+	for _, cr := range rules {
+		p, err := Compile(cr)
+		if err == nil {
+			progs = append(progs, p)
+			continue
+		}
+		if errors.Is(err, ErrUnsupportedBuffer) {
+			// 引擎明确不支持该缓冲区：这条规则不会生效，剔除并记录原因。
+			dropped = append(dropped, fmt.Sprintf("%s: %s", cr.ID, err))
+			continue
+		}
+		// 其它错误才算真正的编译失败。
+		compileErrs = append(compileErrs, err.Error())
+	}
+	return progs, dropped, compileErrs
 }
