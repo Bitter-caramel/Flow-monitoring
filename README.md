@@ -83,3 +83,12 @@ go run ./cmd/parse-cli testdata/test.pcapng
 | [`docs/规则翻译器.md`](docs/规则翻译器.md) | Suricata 规则导入的微型架构（三层 + IR） |
 | [`docs/规则翻译器扩展指南.md`](docs/规则翻译器扩展指南.md) | 加关键字的改动地图 + 插件化搬家蓝图 |
 | [`docs/检测引擎.md`](docs/检测引擎.md) | 检测引擎设计：`Ctx` / 缓冲区提取器 / 匹配语义 / 两次编译 / 性能红线 / P0 边界 |
+
+---
+
+## 六、开源协议
+
+本项目采用 **MIT License**，详见 [`LICENSE`](LICENSE)。
+
+第三方依赖（gopacket、pgx、gorilla/websocket、hashicorp/go-plugin 等）各自保留其原有协议
+（均为 MIT / BSD / Apache-2.0 这类宽松协议，与 MIT 兼容）。
