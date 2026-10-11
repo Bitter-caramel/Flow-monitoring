@@ -1,0 +1,3 @@
+alert tcp any any -> any any (msg:"e2e-any-payload"; pcre:"/./"; sid:300001;)
+alert tcp any any -> any any (msg:"e2e-never-match"; content:"NEVER-APPEARS-IN-SAMPLE-XYZ"; sid:300002;)
+alert tcp any any -> any 1 (msg:"e2e-port-miss"; pcre:"/./"; sid:300003;)
