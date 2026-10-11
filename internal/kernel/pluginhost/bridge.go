@@ -240,7 +240,7 @@ func (b *Bridge) Services() map[string]plugin.ServiceRef {
 	return out
 }
 
-// ImportCapture 已移除：原始 pcap 文件由模块进程自己读写（本地磁盘），
+// ImportCapture 已移除：原始抓包文件由模块进程自己读写（本地磁盘），
 // 宿主只负责元数据索引（CaptureCreate / PacketSaveBatch），避免大块字节走 RPC。
 
 // CaptureCreate 写入抓包元数据索引（模块进程写盘后调用）。

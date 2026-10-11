@@ -11,7 +11,7 @@ import (
 // 用法：POST /api/v1/captures/import
 //
 //	Content-Type: multipart/form-data
-//	字段：file（pcap/pcapng 文件，必填）、name（可选名称）
+//	字段：file（pcapng 文件，必填）、name（可选名称）
 //
 // 成功返回 storage.CaptureRecord JSON。
 func (i *Importer) ImportHandler() http.HandlerFunc {

@@ -23,7 +23,7 @@ func New(store *packetstore.Store) *Importer {
 	return &Importer{store: store}
 }
 
-// Import 导入一个 pcap/pcapng 文件。
+// Import 导入一个 pcapng 文件。
 //
 // 流程：
 //  1. 检查魔数（pcapng 解析器会校验）
