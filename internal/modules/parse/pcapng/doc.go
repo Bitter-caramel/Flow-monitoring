@@ -14,7 +14,6 @@
 //
 // 未实现（后续迭代）：
 //   - SPB / obsolete Packet Block / NRB / ISB / DSB（P1）
-//   - 经典 pcap 格式兼容（P1）
 //   - gzip 解压（P1）
 //
 // 与 datamodel 的关系：Parse 产出 *datamodel.Capture，其中每个 Packet.Data 通过

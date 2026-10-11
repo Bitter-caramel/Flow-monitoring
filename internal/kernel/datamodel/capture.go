@@ -41,10 +41,10 @@ const DefaultTSScale = 1e6
 // 字段 Raw 是原始字节切片，所有 Packet.Data 都通过 DataOff+CapLen 在 Raw 中
 // 零拷贝 subarray 引用——对应 PacketLens 中 cap.raw 的设计。
 type Capture struct {
-	Format   string            // "pcapng"/"pcap"/"pcap-mod"/"snoop"/"mitm"...
+	Format   string            // 抓包格式（当前为 "pcapng"）
 	Endian   string            // "little"/"big"
 	Version  string            // 如 "1.0"
-	SnapLen  int               // 全局 snaplen（pcap 来自文件头，pcapng 取首个 IDB）
+	SnapLen  int               // 全局 snaplen（pcapng 取首个 IDB）
 	LinkType int               // 全局链路类型（同上）
 	Ifaces   []Interface       // 接口列表（pcapng 单接口时仅 1 项）
 	Packets  []*Packet         // 解析后的包列表（大文件时可为空，仅靠 Raw+索引）

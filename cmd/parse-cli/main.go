@@ -1,6 +1,6 @@
 // Command parse-cli 是协议解析的命令行验证工具。
 //
-// 读取 pcap/pcapng 文件，解析并输出类似 Wireshark 的包列表，
+// 读取 pcapng 文件，解析并输出类似 Wireshark 的包列表，
 // 用于验证 pcapng reader + decoder 的解析效果（不依赖后端/数据库）。
 //
 // 用法：

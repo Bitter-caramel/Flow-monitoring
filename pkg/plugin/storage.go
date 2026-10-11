@@ -9,11 +9,11 @@ import "time"
 type CaptureRecord struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
-	Format      string    `json:"format"`    // pcapng/pcap/...
+	Format      string    `json:"format"`    // 抓包格式（当前为 "pcapng"）
 	LinkType    int       `json:"link_type"` // LINKTYPE_*
 	PacketCount int       `json:"packet_count"`
 	ByteSize    int64     `json:"byte_size"` // 原始文件字节数
-	FilePath    string    `json:"file_path"` // 原始 pcap 文件路径
+	FilePath    string    `json:"file_path"` // 原始抓包文件路径
 	SHA256      string    `json:"sha256"`
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`

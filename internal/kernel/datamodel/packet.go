@@ -14,7 +14,7 @@ import "time"
 // 该结构被解析层（decoder）写入、分析层（analyzer）读取并补充流字段、
 // 存储层（packet-store）按偏移索引、查询层（query-api）按需物化。
 type Packet struct {
-	// === 帧元信息（parsePcapNG/parsePcap 阶段注入） ===
+	// === 帧元信息（pcapng 解析阶段注入） ===
 	No      int       // 包序号，从 1 开始
 	Sec     int64     // 时间戳秒（绝对）
 	Usec    int64     // 时间戳小数部分（单位依赖接口 tsresol，常见为微秒）

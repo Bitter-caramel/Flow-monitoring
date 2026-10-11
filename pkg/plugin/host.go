@@ -34,7 +34,7 @@ type Host interface {
 	// —— 存储（模块不直连数据库，经宿主访问）——
 	// 模块侧用 internal/modules/common/hoststore 适配器把本组方法包装成
 	// 完整的 storage.Storage，从而零改动复用既有存储实现代码。
-	// 注意：原始 pcap 文件的读写由模块进程自己完成（local disk），
+	// 注意：原始抓包文件的读写由模块进程自己完成（local disk），
 	// 宿主只负责元数据索引，避免大块字节走 RPC。
 	CaptureCreate(rec CaptureRecord) error
 	CaptureGet(id string) (CaptureRecord, bool)
