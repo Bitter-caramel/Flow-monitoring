@@ -56,20 +56,20 @@ func New() *Analyzer {
 	}
 }
 
-// Feed 把一个解码后的包喂给聚合器。
+// FeedFlow 与 Feed 相同，但同时返回该包归属的 Flow（未归流时返回 nil）。
 //
 // 仅处理 IPv4（IPVersion==4）且为 TCP（IPProto==6）或 UDP（IPProto==17）
-// 的包，其它包直接返回。成功归并后回写 p.StreamID 与 p.StreamDir。
-func (a *Analyzer) Feed(p *datamodel.Packet) {
+// 的包，其它包直接返回 nil。成功归并后回写 p.StreamID 与 p.StreamDir。
+func (a *Analyzer) FeedFlow(p *datamodel.Packet) *datamodel.Flow {
 	if a == nil || p == nil {
-		return
+		return nil
 	}
 	// 只处理 IPv4 的 TCP/UDP。
 	if p.IPVersion != 4 {
-		return
+		return nil
 	}
 	if p.IPProto != 6 && p.IPProto != 17 {
-		return
+		return nil
 	}
 
 	// 五元组规范化：A=低地址方向，B=高地址方向。
@@ -149,6 +149,13 @@ func (a *Analyzer) Feed(p *datamodel.Packet) {
 	// 回写流归属，供下游（存储/查询/展示）消费。
 	p.StreamID = int(f.ID)
 	p.StreamDir = uint8(dir)
+
+	return f
+}
+
+// Feed 把一个解码后的包喂给聚合器，行为与 FeedFlow 完全一致（忽略返回值）。
+func (a *Analyzer) Feed(p *datamodel.Packet) {
+	a.FeedFlow(p)
 }
 
 // Flows 返回当前所有流。

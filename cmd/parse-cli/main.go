@@ -5,10 +5,11 @@
 //
 // 用法：
 //
-//	parse-cli <file.pcapng> [--limit N] [--analyze] [--top N]
+//	parse-cli <file.pcapng> [--limit N] [--analyze] [--top N] [--detect <规则文件>]
 //
 // 输出列：No / 时间 / 源 → 目的 / 协议 / 长度 / INFO
 // 开启 --analyze 后不再逐包打印，改为输出流聚合/协议/端点/端口四段统计。
+// 开启 --detect 后加载规则文件做检测，不逐包打印，仅打印命中行与告警汇总。
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 	"sort"
 
 	"flow-monitoring/internal/kernel/datamodel"
+	"flow-monitoring/internal/modules/detect"
 	"flow-monitoring/internal/modules/parse/analyzer"
 	"flow-monitoring/internal/modules/parse/decoder"
 	"flow-monitoring/internal/modules/parse/pcapng"
@@ -28,6 +30,7 @@ func main() {
 	limit := flag.Int("limit", 0, "最大解析包数（0=不限制）")
 	analyze := flag.Bool("analyze", false, "启用流聚合分析（不逐包打印）")
 	top := flag.Int("top", 10, "排行榜显示条数")
+	detectPath := flag.String("detect", "", "载入规则文件并做检测（如 --detect rules.rules）")
 	flag.Parse()
 
 	// Go 的 flag 包默认在首个位置参数（文件名）处停止解析，
@@ -40,10 +43,23 @@ func main() {
 	}
 
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "用法: parse-cli <file.pcapng> [--limit N] [--analyze] [--top N]")
+		fmt.Fprintln(os.Stderr, "用法: parse-cli <file.pcapng> [--limit N] [--analyze] [--top N] [--detect <规则文件>]")
 		os.Exit(1)
 	}
 	path := args[0]
+
+	// --detect：载入规则文件并构建检测引擎（检测也依赖流归属）。
+	var eng *detect.Engine
+	if *detectPath != "" {
+		rs, err := detect.LoadFile(*detectPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "载入规则文件失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(rs.Report.String())
+		fmt.Println()
+		eng = rs.Engine()
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -71,16 +87,22 @@ func main() {
 	fmt.Println()
 
 	// 表头（仅在逐包模式下打印）。
-	if !*analyze {
+	if !*analyze && eng == nil {
 		fmt.Printf("%-6s %-18s %-21s %-21s %-9s %-6s %s\n",
 			"No.", "Time", "Source", "Destination", "Protocol", "Length", "Info")
 		fmt.Println("----------------------------------------------------------------------------------------------")
 	}
 
+	// 检测/分析模式都需要流归属。
 	var a *analyzer.Analyzer
-	if *analyze {
+	if *analyze || eng != nil {
 		a = analyzer.New()
 	}
+
+	// 告警汇总累加器（仅检测模式使用）。
+	alertTotal := 0
+	hitsByRule := make(map[string]int)
+	nameByRule := make(map[string]string)
 
 	for _, p := range cap.Packets {
 		linkType := cap.LinkType
@@ -89,8 +111,28 @@ func main() {
 		}
 		decoder.Decode(p, linkType)
 
+		// 检测模式：归流并匹配规则（不逐包打印）。
+		if eng != nil {
+			var flow *datamodel.Flow
+			if a != nil {
+				flow = a.FeedFlow(p)
+			}
+			hits := eng.Match(&detect.Ctx{Pkt: p, Flow: flow})
+			for _, h := range hits {
+				alertTotal++
+				hitsByRule[h.RuleID]++
+				if _, ok := nameByRule[h.RuleID]; !ok {
+					nameByRule[h.RuleID] = h.Name
+				}
+				fmt.Printf("[命中] No=%d 时间=%s %s:%d → %s:%d 规则=%s(%s) 缓冲=%s 偏移=%d 片段=%q\n",
+					p.No, formatTime(p), p.Src, p.SrcPort, p.Dst, p.DstPort,
+					h.RuleID, h.Name, h.Buffer, h.Offset, h.Snippet)
+			}
+			continue
+		}
+
+		// 纯 analyze 模式：只归流，不逐包打印（与改动前一致）。
 		if a != nil {
-			// Feed 必须在 Decode 之后：它读取解码后的字段。
 			a.Feed(p)
 			continue
 		}
@@ -107,7 +149,31 @@ func main() {
 			p.No, formatTime(p), src, dst, proto, length, p.Info)
 	}
 
-	if a != nil {
+	// 收尾 1：检测告警汇总（按规则分组，命中次数降序、同次数规则 ID 升序）。
+	if eng != nil {
+		type ruleGroup struct {
+			ID    string
+			Name  string
+			Count int
+		}
+		groups := make([]ruleGroup, 0, len(hitsByRule))
+		for id, cnt := range hitsByRule {
+			groups = append(groups, ruleGroup{ID: id, Name: nameByRule[id], Count: cnt})
+		}
+		sort.Slice(groups, func(i, j int) bool {
+			if groups[i].Count != groups[j].Count {
+				return groups[i].Count > groups[j].Count
+			}
+			return groups[i].ID < groups[j].ID
+		})
+		fmt.Printf("=== 检测结果：命中 %d 次，涉及 %d 条规则 ===\n", alertTotal, len(groups))
+		for _, g := range groups {
+			fmt.Printf("规则 %s (%s) 命中 %d 次\n", g.ID, g.Name, g.Count)
+		}
+	}
+
+	// 收尾 2：纯分析统计（保持原有顺序/格式）。
+	if *analyze {
 		printAnalysis(a, *top)
 	}
 }
