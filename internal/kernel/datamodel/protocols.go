@@ -1,5 +1,23 @@
 package datamodel
 
+import "strconv"
+
+// TransportName 返回 IP 协议号对应的传输层协议名（小写）。
+// 与 FillProtocols 的传输层部分保持一致：6=tcp、17=udp、1/58=icmp；
+// 其它协议返回 "ip-<num>"（如 "ip-47"），保证任何包都有稳定可读的名字。
+func TransportName(ipProto uint8) string {
+	switch ipProto {
+	case 6:
+		return "tcp"
+	case 17:
+		return "udp"
+	case 1, 58:
+		return "icmp"
+	default:
+		return "ip-" + strconv.FormatUint(uint64(ipProto), 10)
+	}
+}
+
 // FillProtocols 把「该包所属的协议集合」以规范小写名写入调用方提供的数组 dst，
 // 返回实际写入的个数（不追加、不建 map / 切片）。
 //

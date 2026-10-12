@@ -341,3 +341,66 @@ func TestProtocolVocabMatchesRuleConstants(t *testing.T) {
 		}
 	}
 }
+
+// 验证 Alert 带包级定位：PktNo 来自 Packet.No、FlowKey 是规范化五元组。
+func TestAlertHasPacketLocator(t *testing.T) {
+	ex := extOf(t, rule.BufPayload)
+	prog := &Program{ID: "r-loc", Proto: rule.ProtoAny, SrcPort: anyPort(), DstPort: anyPort(),
+		Conds: []Cond{{Kind: rule.CondContent, Extract: ex, Buf: rule.BufPayload, Content: []byte("GET")}}}
+	pkt := &datamodel.Packet{
+		No:         42,
+		Data:       []byte("GET /x"),
+		PayloadOff: 0,
+		PayloadLen: len("GET /x"),
+		SrcIP:      "10.0.0.5",
+		SrcPort:    50000,
+		DstIP:      "93.184.216.34",
+		DstPort:    80,
+		IPProto:    6,
+		Proto:      "HTTP",
+	}
+	got := NewEngine([]*Program{prog}).Match(&Ctx{Pkt: pkt})
+	if len(got) != 1 {
+		t.Fatalf("应命中 1 条, got=%d", len(got))
+	}
+	if got[0].PktNo != 42 {
+		t.Fatalf("PktNo 期望 42, 实际 %d", got[0].PktNo)
+	}
+	const wantKey = "10.0.0.5:50000->93.184.216.34:80/tcp"
+	if got[0].FlowKey != wantKey {
+		t.Fatalf("FlowKey 期望 %q, 实际 %q", wantKey, got[0].FlowKey)
+	}
+}
+
+// 守门测试：FlowKey 是稳定键 —— 同一五元组不因 L7 展示名（Proto）在 HTTP/TCP 间跳变。
+func TestTransportNameKeepsFlowKeyStable(t *testing.T) {
+	ex := extOf(t, rule.BufPayload)
+	prog := &Program{ID: "r-stable", Proto: rule.ProtoAny, SrcPort: anyPort(), DstPort: anyPort(),
+		Conds: []Cond{{Kind: rule.CondContent, Extract: ex, Buf: rule.BufPayload, Content: []byte("GET")}}}
+	eng := NewEngine([]*Program{prog})
+	// 同一个包，只改 L7 展示名，跑两次。
+	pkt := &datamodel.Packet{
+		No:         1,
+		Data:       []byte("GET /x"),
+		PayloadOff: 0,
+		PayloadLen: len("GET /x"),
+		SrcIP:      "10.0.0.5",
+		SrcPort:    50000,
+		DstIP:      "93.184.216.34",
+		DstPort:    80,
+		IPProto:    6,
+	}
+	pkt.Proto = "HTTP"
+	httpAlerts := eng.Match(&Ctx{Pkt: pkt})
+	pkt.Proto = "TCP"
+	tcpAlerts := eng.Match(&Ctx{Pkt: pkt})
+	if len(httpAlerts) != 1 || len(tcpAlerts) != 1 {
+		t.Fatalf("两次都应命中 1 条, got=%d/%d", len(httpAlerts), len(tcpAlerts))
+	}
+	if httpAlerts[0].FlowKey != tcpAlerts[0].FlowKey {
+		t.Fatalf("同一五元组 FlowKey 必须稳定: HTTP=%q, TCP=%q", httpAlerts[0].FlowKey, tcpAlerts[0].FlowKey)
+	}
+	if want := "10.0.0.5:50000->93.184.216.34:80/tcp"; httpAlerts[0].FlowKey != want {
+		t.Fatalf("FlowKey 期望 %q, 实际 %q", want, httpAlerts[0].FlowKey)
+	}
+}

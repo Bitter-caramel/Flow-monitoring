@@ -2,6 +2,7 @@ package detect
 
 import (
 	"bytes"
+	"fmt"
 	"time"
 
 	"flow-monitoring/internal/kernel/datamodel"
@@ -23,6 +24,8 @@ type Alert struct {
 	DstPort  uint16
 	Proto    string // Ctx.Pkt.Proto（展示名）
 	StreamID int    // Ctx.Pkt.StreamID（-1 = 未归属）
+	PktNo    int    // 包序号（来自 Packet.No，从 1 开始）；★“从告警跳回那个包”的关键
+	FlowKey  string // 规范化五元组的可读形式，如 "10.0.0.5:50000->93.184.216.34:80/tcp"
 	Buffer   rule.Buffer
 	Offset   int    // 命中位置（相对该缓冲区）
 	Snippet  string // 命中的那几字节（最多 64，避免告警过大）
@@ -115,6 +118,8 @@ func buildAlert(p *Program, c *Ctx, buf rule.Buffer, off int) Alert {
 		DstPort:  pkt.DstPort,
 		Proto:    pkt.Proto,
 		StreamID: pkt.StreamID,
+		PktNo:    pkt.No,
+		FlowKey:  fmt.Sprintf("%s:%d->%s:%d/%s", pkt.SrcIP, pkt.SrcPort, pkt.DstIP, pkt.DstPort, datamodel.TransportName(pkt.IPProto)),
 		Buffer:   buf,
 		Offset:   off,
 	}
