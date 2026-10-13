@@ -270,3 +270,77 @@ func (s *SegmentStore) sealCurrent() error {
 	}
 	return nil
 }
+
+// ReadRange 返回时间落在 [from, to]（闭区间）内的原始帧，并报告本来源是否**完整覆盖**了该范围。
+//
+// complete 的含义：该范围内的数据在本来源里是齐全的
+// （每个与 [from,to] 相交的段都存在且没被保留策略删掉）。有任何洞就返回 false。
+//
+// 实现要点：
+//   - 只读 s.Segments() 的索引挑出与 [from,to] 相交的段，不依赖"正在写"状态
+//     （store 已 Close 过也能正常读）；
+//   - 先 Flush 当前正在写的段，并把它也一起读 —— 否则最新那一段永远缺失；
+//   - 已删除（被保留策略删掉）的相交段 -> complete=false；
+//   - 未删除的段文件缺失 / 解析失败 -> 返回错误。
+func (s *SegmentStore) ReadRange(from, to time.Time) ([]Frame, bool, error) {
+	// 在锁内取索引快照，并 Flush 当前段（只冲刷、不关闭底层文件），
+	// 保证已写入的字节可被读到；随后立刻释放锁，逐段读文件不阻塞写路径。
+	s.mu.Lock()
+	segments := make([]SegmentInfo, len(s.sealed))
+	copy(segments, s.sealed)
+	if s.cur != nil {
+		if err := s.cur.Flush(); err != nil {
+			s.mu.Unlock()
+			return nil, false, fmt.Errorf("collect: flush current segment: %w", err)
+		}
+		segments = append(segments, SegmentInfo{
+			No:        s.curNo,
+			Name:      s.curName,
+			Bytes:     s.cur.BytesWritten(),
+			Packets:   s.curPackets,
+			StartTime: s.curStart,
+			EndTime:   s.curEnd,
+		})
+	}
+	dir := s.dir
+	s.mu.Unlock()
+
+	var (
+		frames     []Frame
+		intersects int
+		complete   = true
+	)
+	for _, seg := range segments {
+		// 与 [from,to] 相交：seg.EndTime >= from && seg.StartTime <= to。
+		if seg.EndTime.Before(from) || seg.StartTime.After(to) {
+			continue
+		}
+		intersects++
+		if seg.Deleted {
+			// 文件已被保留策略删除：范围内有洞，且无法再读回。
+			complete = false
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, seg.Name))
+		if err != nil {
+			return nil, false, fmt.Errorf("collect: read segment %s: %w", seg.Name, err)
+		}
+		cap, err := pcapng.Parse(data, 0)
+		if err != nil {
+			return nil, false, fmt.Errorf("collect: parse segment %s: %w", seg.Name, err)
+		}
+		for _, p := range cap.Packets {
+			if p == nil || p.Time.Before(from) || p.Time.After(to) {
+				continue
+			}
+			d := make([]byte, len(p.Data))
+			copy(d, p.Data)
+			frames = append(frames, Frame{Time: p.Time, No: p.No, Data: d})
+		}
+	}
+	// 没有任何段覆盖该范围时，无法证明完整，保守判为不完整。
+	if intersects == 0 {
+		complete = false
+	}
+	return frames, complete, nil
+}
