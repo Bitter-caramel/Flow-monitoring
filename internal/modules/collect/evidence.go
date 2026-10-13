@@ -74,7 +74,7 @@ type evidenceWindow struct {
 //
 // 落盘策略严格遵循"磁盘留存是不淘汰的账本、环形缓冲只是安全网"：
 //   - 磁盘能完整覆盖窗口 -> 只读磁盘（sources=["disk"]，incomplete=false）；
-//   - 磁盘不完整 -> 才用环补缺口，按包号 No 去重（同号优先磁盘），sources 含 "ring"；
+//   - 磁盘不完整 -> 才用环补缺口，按帧时间 + 帧字节哈希去重（pcapng 不保存包序号，磁盘帧的 No 是段内局部号），sources 含 "ring"；
 //   - 两边都没有 -> 仍产出文件，incomplete=true 且 Reason 写清原因。
 type EvidenceCollector struct {
 	mu    sync.Mutex
@@ -212,12 +212,12 @@ func (e *EvidenceCollector) flushWindow(w *evidenceWindow) (string, error) {
 			frames = diskFrames
 			sources = []string{"disk"}
 		} else {
-			// ② 磁盘不完整 -> 用环补缺口，按包号去重（同号优先磁盘）。
+			// ② 磁盘不完整 -> 用环补缺口，按帧时间 + 帧字节哈希去重（同帧优先磁盘）。
 			var ringFrames []Frame
 			if e.ring != nil {
 				ringFrames = e.ring.Slice(from, to)
 			}
-			frames = mergeByNo(diskFrames, ringFrames)
+			frames = mergeFrames(diskFrames, ringFrames)
 			sources = []string{"disk"}
 			if len(ringFrames) > 0 {
 				sources = append(sources, "ring")
@@ -338,7 +338,7 @@ func epbBlockSize(dataLen int) int64 {
 	return int64(12 + 20 + dataLen + pad + 4)
 }
 
-// mergeByNo 合并磁盘帧与环帧，去掉"同一帧"的重复，同一帧优先保留磁盘的那份。
+// mergeFrames 合并磁盘帧与环帧，去掉"同一帧"的重复，同一帧优先保留磁盘的那份。
 //
 // ★ 与题面不一致的说明（以现有代码为准）：题面要求"按包号 No 去重"，但本仓库的
 // SegmentStore 把每段写成独立的 pcapng 段文件，而 pcapng 格式并不保存包序号——
@@ -348,7 +348,7 @@ func epbBlockSize(dataLen int) int64 {
 //
 // 这里改用"帧时间（微秒，与磁盘存储分辨率一致）+ 帧字节哈希"来识别同一帧：
 // 语义仍是"同一帧优先磁盘"，既去掉重复又不会误删真正不同的帧。
-func mergeByNo(disk, ring []Frame) []Frame {
+func mergeFrames(disk, ring []Frame) []Frame {
 	// 磁盘帧原样保留（不与其他磁盘帧互相去重），只把重复的环帧剔掉。
 	out := make([]Frame, 0, len(disk)+len(ring))
 	out = append(out, disk...)

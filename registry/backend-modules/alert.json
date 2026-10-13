@@ -7,5 +7,5 @@
   "binary": "alert",
   "http_base": "/api/v1/alerts",
   "provides": ["alert.api"],
-  "injects": ["situation.level"]
+  "injects": ["situation.level", "alert.lifecycle"]
 }

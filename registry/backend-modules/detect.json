@@ -5,5 +5,5 @@
   "layer": "L2",
   "enabled": false,
   "binary": "detect",
-  "provides": ["detect.feature"]
+  "provides": ["detect.feature", "alert.lifecycle"]
 }
