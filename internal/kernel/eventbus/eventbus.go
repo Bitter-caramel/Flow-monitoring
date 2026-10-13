@@ -136,26 +136,24 @@ func (b *Bus) PublishEvent(ev Event) error {
 	}
 
 	b.mu.RLock()
+	defer b.mu.RUnlock()
+
 	if b.closed {
-		b.mu.RUnlock()
 		return ErrClosed
 	}
-	// 取订阅者 channel 列表（快照，避免持锁做投递）
-	var chs []chan Event
-	if m, ok := b.subs[ev.Topic]; ok {
-		chs = make([]chan Event, 0, len(m))
-		for _, ch := range m {
-			chs = append(chs, ch)
-		}
-	}
-	b.mu.RUnlock()
 
-	for _, ch := range chs {
-		// 非阻塞投递：满则丢弃
-		select {
-		case ch <- ev:
-		default:
-			b.dropped.Add(1)
+	// 投递在读锁内完成，以保证与 Unsubscribe/Close 的 close(ch) 互斥：
+	// 读锁阻止二者（写锁）在投递期间删除并关闭 channel。
+	// 非阻塞发送（带 default）不会阻塞，因此持读锁投递不会死锁，
+	// 且读锁之间不互斥，仍允许多个发布者并发。
+	if m, ok := b.subs[ev.Topic]; ok {
+		for _, ch := range m {
+			select {
+			case ch <- ev:
+			default:
+				// 缓冲满则丢弃并计数
+				b.dropped.Add(1)
+			}
 		}
 	}
 	return nil

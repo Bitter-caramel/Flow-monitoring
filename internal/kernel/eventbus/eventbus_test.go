@@ -172,3 +172,41 @@ func TestDefaultBufSize(t *testing.T) {
 		t.Errorf("buf cap = %d, want 1024", cap(sub.ch))
 	}
 }
+
+// TestPublishUnsubscribeRace 验证并发 Publish 与 Subscribe/Unsubscribe 不会 panic。
+//
+// 现有测试均为顺序调用，从未覆盖 PublishEvent 在解锁后投递、
+// 而 Unsubscribe/Close 同时 close(ch) 的竞态路径。
+func TestPublishUnsubscribeRace(t *testing.T) {
+	bus := New()
+	stop := make(chan struct{})
+
+	const producers = 8
+	exited := make(chan struct{}, producers)
+	for p := 0; p < producers; p++ {
+		go func(base int) {
+			i := base
+			for {
+				select {
+				case <-stop:
+					exited <- struct{}{}
+					return
+				default:
+				}
+				_ = bus.Publish("race.topic", i)
+				i++
+			}
+		}(p)
+	}
+
+	for round := 0; round < 50000; round++ {
+		sub := bus.Subscribe("race.topic", 1)
+		bus.Unsubscribe(sub)
+	}
+
+	close(stop)
+	for p := 0; p < producers; p++ {
+		<-exited
+	}
+	bus.Close()
+}
