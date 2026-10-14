@@ -3,3 +3,4 @@
 *.mod text eol=lf
 *.sum text eol=lf
 internal/modules/rule/pipeline/testdata/** text eol=lf
+internal/hotpath/testdata/** text eol=lf

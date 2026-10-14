@@ -231,3 +231,34 @@ A 组 23 行、B 组 20 行 stdout 完全一致（唯一差异是我自己指定
 `Feed`/`Match` 换序后它照样通过**（命中 13 → 6，仍 > 0 ⇒ `streamHits > 0` 这条断言守不住顺序）✗。
 ⇒ **"≥1 / >0" 这类弱断言几乎守不住任何东西**；新的回归网必须做一次**故意破坏（变异）检验**，
 否则你不知道它守的是不是空气。严格的顺序锁改由 11-5b 的 golden（逐行精确比对）承担。
+
+### 12.8 11-5b 已落地：三组引擎级 golden（并把上面那条弱断言收紧）
+
+`internal/hotpath/golden_test.go`：`LoadFile → hotpath.New → 逐包 Decode → Process`（**走生产真路径**），
+把命中规范成一行 `No=<PktNo> sid=<RuleID> buf=<Buffer> off=<Offset> snip=<%q>`，
+与 `.golden` **逐行精确比对**（不含时间/绝对路径/耗时；两侧行尾归一化；忽略末尾空行）。
+`-update` 才写回，且**最低期望断言失败时拒绝写回**（防止把 bug 烤进 golden）。
+
+| golden | 规则 | 锁定内容 |
+|---|---|---|
+| `explicit-payload.golden` | 显式 `payload;` | 10 命中，全部 `buf=payload` |
+| `explicit-stream.golden` | 显式 `stream;` | 13 命中，全部 `buf=stream`，其中 **12 条来自 IPv6 包** |
+| `default.golden` | **裸规则 `e2e.rules`** | 当前 10 命中全 `payload` —— ★ **11-2 翻默认缓冲的信号线** |
+
+★ `default.golden` 的角色写进了测试文档注释：**11-2 落地时把旧文件改名
+`default-v1-payload.golden` 永久保留、再用 `-update` 生成新的 `default.golden`（stream 语义）**，
+于是"换默认缓冲前后的行为"永久留成两份可对照的可执行记录（用户 2026-10-14 拍板的"甲"）。
+
+★ 本任务同时把 12.7 记的那条弱断言**收紧为精确计数**：`TestProcessFeedsReassemblyBeforeMatch`
+现在断言 `总命中 == 13 且 stream 命中 == 13`。
+
+**两项独立验证（PM 在仓库外副本 `D:\tmp\mut-11-5b` 上做，仓库本体一行未动）**：
+
+1. **可复现性**：副本里重跑 `-update`，三份 golden 哈希**完全不变**，且与仓库里的**逐字节一致**；
+2. **顺序变异**（把 `Feed`/`Match` 换序）：`TestGoldenHits/explicit-stream` **红**（逐行全不一致）、
+   收紧后的顺序测试 **红**（`总命中 6（期望 13）`）；而 `explicit-payload` / `default` 两组**仍绿**
+   —— 说明 golden 是**精确**的（只对"该变的那条"报警），不是"一改就全红"的假守卫。
+
+★ 顺带记一个**干净的变异手法**（trae 本次自己用的，值得沿用）：
+`go test -overlay <overlay.json>` —— 用 JSON 把某个 `.go` 文件映射到仓库外的一份改过的副本，
+**完全不碰仓库源码**就能做变异检验（比"改完再恢复"安全得多）。

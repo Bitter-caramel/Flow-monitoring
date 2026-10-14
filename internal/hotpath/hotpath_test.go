@@ -53,8 +53,10 @@ func TestProcessNilSafe(t *testing.T) {
 	}
 }
 
-// TestProcessFeedsReassemblyBeforeMatch 是「顺序红线」的守卫：
-// 若把重组器 Feed 与引擎 Match 的顺序写反，当包将看不到自己那段流，本测试变红。
+// TestProcessFeedsReassemblyBeforeMatch 是「顺序红线」的守卫：名字与断言都瞄准
+// 「先 Feed 再 Match」这条不变量。期望值取自真实夹具：正确顺序下总命中 13、其中 stream 命中 13。
+// ★ 这两个数字就是"顺序红线"的信号：把 Feed/Match 换序后总命中会掉到 6（实测），
+// 所以精确计数才是守卫，"streamHits > 0" 那种弱断言守不住顺序（换序成 6 仍 >0，照样通过）。
 func TestProcessFeedsReassemblyBeforeMatch(t *testing.T) {
 	rs := detect.LoadText(`alert tcp any any -> any any (msg:"x"; stream; pcre:"/./"; sid:950002;)`)
 	hp := New(rs)
@@ -93,7 +95,13 @@ func TestProcessFeedsReassemblyBeforeMatch(t *testing.T) {
 		}
 	}
 	t.Logf("实际观测：总命中 %d，其中 Buffer==stream 命中 %d", total, streamHits)
-	if streamHits == 0 {
-		t.Fatalf("没有任何命中的 Buffer==stream（总命中 %d）：Feed 与 Match 的顺序可能被写反", total)
+
+	// 期望值取自真实夹具：正确顺序下总命中 13、其中 stream 命中 13。
+	// ★ 这两个数字就是"顺序红线"的信号：把 Feed/Match 换序后总命中会掉到 6（实测），
+	//   所以精确计数才是守卫，"streamHits > 0" 那种弱断言守不住顺序。
+	const wantTotal, wantStreamHits = 13, 13
+	if total != wantTotal || streamHits != wantStreamHits {
+		t.Fatalf("顺序红线被破坏或夹具变化：总命中 %d（期望 %d），其中 stream %d（期望 %d）",
+			total, wantTotal, streamHits, wantStreamHits)
 	}
 }

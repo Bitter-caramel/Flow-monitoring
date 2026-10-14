@@ -1,0 +1,1 @@
+alert tcp any any -> any any (msg:"golden-explicit-stream"; stream; pcre:"/./"; sid:960002; rev:1;)
