@@ -33,7 +33,7 @@ func init() {
 	Register(rule.BufHTTPMethod, extractHTTPMethod)
 	Register(rule.BufDNSQuery, extractDNSQuery)
 	Register(rule.BufTLSSNI, extractTLSSNI)
-	Register(bufStream, extractStream)
+	Register(rule.BufStream, extractStream)
 }
 
 // 说明：下面所有「相对载荷」的偏移，都是相对 P.PayloadOff 而言的，
@@ -147,11 +147,6 @@ func extractTLSSNI(c *Ctx) []byte {
 	}
 	return []byte(c.Pkt.TLS.SNI)
 }
-
-// bufStream 是本步（11-1）新增的缓冲区名：TCP 重组后的流（P1）。
-// 说明：rule 包尚未定义该常量，而本步不允许改 ir.go，故这里用 Buffer 字面量，
-// 与缓冲区注册层（kw/buffer）使用的字符串 "stream" 保持一致。
-const bufStream rule.Buffer = "stream"
 
 // extractStream 返回该方向**已重组**的流字节（P1）。
 // 本步只做「接缝」，不实现重组器：没有重组器时 ctx.Stream 一律为 nil，

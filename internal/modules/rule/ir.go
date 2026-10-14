@@ -72,6 +72,7 @@ type Buffer string
 
 const (
 	BufPayload        Buffer = "payload"          // 整个载荷（默认）
+	BufStream         Buffer = "stream"           // TCP 重组后的流字节（P1）
 	BufHTTPURI        Buffer = "http_uri"         // HTTP 请求 URI
 	BufHTTPHeader     Buffer = "http_header"      // HTTP 头
 	BufHTTPMethod     Buffer = "http_method"      // HTTP 方法

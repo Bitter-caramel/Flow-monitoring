@@ -12,5 +12,5 @@ import (
 // 本步按「新增一个文件」的要求新增本文件，复用同一套 bufKW 机制注册同名
 // 缓冲区 "stream"；直接调用 kw.Register，不受跨文件 init 顺序影响。
 func init() {
-	kw.Register(bufKW{name: "stream", buf: rule.Buffer("stream")})
+	kw.Register(bufKW{name: "stream", buf: rule.BufStream})
 }
