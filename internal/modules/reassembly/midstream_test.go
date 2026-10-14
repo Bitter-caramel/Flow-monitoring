@@ -1,10 +1,13 @@
 package reassembly
 
-// midstream_test.go —— 「中途流（无 SYN）+ 乱序」的诊断测试（任务 11-6c）。
+// midstream_test.go —— 「中途流（无 SYN）+ 乱序」的诊断与修复守卫（任务 11-6c / 11-6c-fix）。
 //
-// ★ 本文件是**诊断**，不改任何生产代码（reassembly.go / stream.go / options.go 一行不动）：
-//   它把 PM 在仓库外副本里探针实测到的行为钉成可执行断言，并留出一个只读的辨别手段，
-//   用来区分「更小序号段被丢弃」与「流被过早移出 / 重建」两件事。
+// ★ 11-6c 是**诊断**（只加测试）；11-6c-fix 之后本文件同时守卫两件事：
+//   ① 诊断结论本身（把 PM 探针实测到的行为钉成断言）；
+//   ② 修复后的新行为：D（ReassemblyComplete 顺手清理我们自己的 byKey/byID + 缓冲）与
+//      C′ 的簿记（只有「真的出现过落在基准之前的段」的流才被标 `Midstream()`）。
+//   其中 TestMidstreamStreamNotEvictedByReorder 的第 5 步是**刻意翻转**的断言
+//   （原断言记录的是"我们仍持旧 stream"这个缺陷）。
 //
 // 背景（PM 探针实测，同一条流、同一五元组）：
 //
@@ -273,16 +276,28 @@ func TestMidstreamStreamNotEvictedByReorder(t *testing.T) {
 	}
 
 	// 第二方向 FIN ⇒ 两个 half 都 closed ⇒ ReassemblyComplete(true) ⇒ connPool.remove。
+	//
+	// ★ 11-6c-fix（D）之后**刻意翻转**的断言：以前我们只让 gopacket 把连接移出池，
+	// **自己的 byKey/byID 仍持有已关闭的旧 stream**（陈旧引用 + 缓冲滞留，docs §7.3）。
+	// D 让 ReassemblyComplete 顺手 dropStream ⇒ 现在两个方向 FIN 之后我们自己也要摘干净。
 	finDown := midFinRev(t, 0)
 	r.Feed(finDown)
-	t.Logf("阶段二 step5 Feed FIN B->A: byKey=%p FlowCount=%d Bytes=%d（池已 remove，但我们 byKey 仍持旧 stream=%v）",
-		r.byKey[key], r.FlowCount(), r.Bytes(), r.byKey[key] == s0)
-	if r.byKey[key] != s0 {
-		t.Fatalf("两方向 FIN 后我们 byKey 仍应持有旧 stream（gopacket 池 remove 不影响我们的 map）：got=%p want=%p", r.byKey[key], s0)
+	t.Logf("阶段二 step5 Feed FIN B->A: byKey=%p byID[1]=%p FlowCount=%d Bytes=%d（D 之后应已摘干净）",
+		r.byKey[key], r.byID[1], r.FlowCount(), r.Bytes())
+	if r.byKey[key] != nil {
+		t.Fatalf("两方向 FIN 后 byKey 应已摘掉旧 stream（D 的清理），实际=%p", r.byKey[key])
+	}
+	if r.byID[1] != nil {
+		t.Fatalf("两方向 FIN 后 byID[1] 应已摘掉旧 stream（D 的清理），实际=%p", r.byID[1])
+	}
+	if r.FlowCount() != 0 {
+		t.Fatalf("两方向 FIN 后 FlowCount=%d, want 0", r.FlowCount())
+	}
+	if r.Bytes() != 0 {
+		t.Fatalf("两方向 FIN 后 Bytes=%d, want 0（旧缓冲应已释放）", r.Bytes())
 	}
 
-	// 再来一个数据段：gopacket 池里连接已被移除 ⇒ 视作新连接 ⇒ factory.New 生成新 stream
-	// 覆盖 byKey/byID，旧缓冲变「陈旧」，视图看不到。
+	// 再来一个数据段：gopacket 池里连接已被移除 ⇒ 视作新连接 ⇒ factory.New 生成新 stream。
 	fresh := midPkt(t, 5000, []byte("NEW"))
 	r.Feed(fresh)
 	sNew := r.byKey[key]
@@ -299,4 +314,67 @@ func TestMidstreamStreamNotEvictedByReorder(t *testing.T) {
 	if !bytes.Equal(view, []byte("NEW")) {
 		t.Fatalf("重建后 View=%q, want %q（旧缓冲 %q 已不可见）", view, "NEW", midSegC)
 	}
+}
+
+// TestMidstreamPreBaselineMarksUnreliable 覆盖 11-6c-fix 的 C′ 簿记（窄口径防漏的判据）：
+// 只有「真的出现过落在基准之前的段」的流才被标成不可信（`View(...).Midstream() == true`），
+// 其它中途流（乱序但不越基准，如 [A,C,B]）以及「根本没有流」的空视图都必须保持 false。
+//
+// ★ 为什么必须钉住这三面：C′ 的作用是**只让不可信的包/流回落 payload**；
+// 一旦判宽了（比如把「没有流」也算不可信、或按"无 SYN"一刀切），就会牺牲中途流的
+// 跨包签名匹配 —— 那是被明确否掉的方案（用户 2026-10-14 拍板用 C′）。
+func TestMidstreamPreBaselineMarksUnreliable(t *testing.T) {
+	t.Run("乱序越基准_标记不可信且粘性", func(t *testing.T) {
+		r := New(DefaultOptions())
+		defer r.Close()
+
+		c := midPkt(t, midSeqC, []byte(midSegC)) // 首个段：基准被钉在 1009
+		r.Feed(c)
+		if got := r.View(c).Midstream(); got {
+			t.Fatalf("喂首个段后 Midstream()=true，want false（还没出现越基准的段）")
+		}
+
+		a := midPkt(t, midSeqA, []byte(midSegA)) // 1001 < 基准 1009 ⇒ 越基准
+		r.Feed(a)
+		if got := r.View(a).Midstream(); !got {
+			t.Fatalf("喂越基准的段后 Midstream()=false，want true（本包应回落 payload）")
+		}
+
+		b := midPkt(t, midSeqB, []byte(midSegB)) // 1005 < 基准 ⇒ 仍越基准；且标记应粘住
+		r.Feed(b)
+		if got := r.View(b).Midstream(); !got {
+			t.Fatalf("后续包 Midstream()=false，want true（unreliable 是粘性标记）")
+		}
+		t.Logf("越基准流：View=%q（只交付了基准之后的 C，A/B 搁浅）", r.View(b).BytesToServer())
+	})
+
+	t.Run("乱序不越基准_不标记", func(t *testing.T) {
+		r := New(DefaultOptions())
+		defer r.Close()
+
+		a := midPkt(t, midSeqA, []byte(midSegA)) // 最小段先到 ⇒ 基准 1001
+		r.Feed(a)
+		c := midPkt(t, midSeqC, []byte(midSegC)) // 1009 > 基准 ⇒ 只是暂存，不越基准
+		r.Feed(c)
+		b := midPkt(t, midSeqB, []byte(midSegB)) // 1005 > 基准
+		r.Feed(b)
+
+		if got := r.View(b).Midstream(); got {
+			t.Fatalf("乱序但未越基准的流 Midstream()=true，want false（不该回落 payload）")
+		}
+		if got := r.View(b).BytesToServer(); !bytes.Equal(got, []byte(midWantFull)) {
+			t.Fatalf("View=%q, want %q", got, midWantFull)
+		}
+	})
+
+	t.Run("空视图不算中途流", func(t *testing.T) {
+		r := New(DefaultOptions())
+		defer r.Close()
+
+		// 完全没喂过的流：View 走不到 byID/byKey ⇒ 空视图。
+		p := midPkt(t, midSeqA, []byte(midSegA))
+		if got := r.View(p).Midstream(); got {
+			t.Fatalf("没有流的空视图 Midstream()=true，want false（★ 否则所有无流包都会回落 payload）")
+		}
+	})
 }

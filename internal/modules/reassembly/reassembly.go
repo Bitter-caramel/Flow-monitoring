@@ -42,6 +42,12 @@ type Reassembler struct {
 	// 零值表示「还没 Flush 过」。
 	lastFlush time.Time
 
+	// preBaseline 是「本包」标记：Feed 在装配之前清零；stream.Accept 遇到
+	// 「落在重组基准之前」的段时置位；View 用它决定本次视图是否不可信（C′）。
+	// Feed 与 View 是同一个包上顺序调用的（hotpath.Process：Feed → Match），
+	// 所以它只对当前包有效，不会串到别的包。
+	preBaseline bool
+
 	// 复用解码层与 parser，避免逐包分配。
 	// Feed 串行调用，与 gopacket Assembler 的并发约束一致，无需加锁。
 	eth     layers.Ethernet
@@ -132,6 +138,11 @@ func (r *Reassembler) Feed(p *datamodel.Packet) {
 	if !ok {
 		return
 	}
+	// ★ preBaseline 是「本包」标记：Feed 在装配之前清掉。stream.Accept 遇到
+	// 「落在重组基准之前」的段时置位；View 用它决定本次视图是否不可信。
+	// Feed 与 View 是同一个包上顺序调用的（hotpath.Process：Feed → Match），
+	// 所以这个标记只对当前包有效，不会串到别的包。
+	r.preBaseline = false
 	// ★ 必须把包的真实 CaptureInfo（尤其是 Timestamp=包时间 p.Time）传给 Assembler：
 	// gopacket 用 ci.Timestamp 记录 half.lastSeen 与乱序页的 page.seen，
 	// 超时 Flush 判定（FlushOptions.T）正是拿它来比较的。缺失则恒为零值，
@@ -208,12 +219,12 @@ func (r *Reassembler) View(p *datamodel.Packet) StreamView {
 	}
 	if p.StreamID >= 0 {
 		if s := r.byID[p.StreamID]; s != nil {
-			return &streamView{s: s}
+			return &streamView{s: s, midstream: s.unreliable || r.preBaseline}
 		}
 	}
 	if k, ok := keyFromPacket(p); ok {
 		if s := r.byKey[k]; s != nil {
-			return &streamView{s: s}
+			return &streamView{s: s, midstream: s.unreliable || r.preBaseline}
 		}
 	}
 	return emptyStreamView{}
@@ -313,9 +324,17 @@ func (r *Reassembler) enforceMemCap() {
 	}
 }
 
-// evict 淘汰一条流：清空缓冲、从表中移除并计数。
-func (r *Reassembler) evict(s *stream) {
-	if s == nil {
+// dropStream 把一条流从我们的表里摘掉并释放它的缓冲（幂等）。
+//
+// ★ 两个调用方：
+//   - evict（MemCap 淘汰）—— 额外记一次 evictions；
+//   - stream.ReassemblyComplete（gopacket 判定连接结束、FIN/RST/超时）—— 见 D：
+//     以前我们只返回 true 让 gopacket 把连接移出池，**自己的 byKey/byID 却继续持有
+//     已关闭的旧 stream**（陈旧引用 + 缓冲滞留，docs/TCP重组.md §7.3）。
+//
+// 只动我们自己的表与缓冲；gopacket 侧的移出由 ReassemblyComplete 的返回值负责。
+func (r *Reassembler) dropStream(s *stream) {
+	if r == nil || s == nil {
 		return
 	}
 	for i := range s.buf {
@@ -329,6 +348,14 @@ func (r *Reassembler) evict(s *stream) {
 	if s.streamID >= 0 && r.byID[s.streamID] == s {
 		delete(r.byID, s.streamID)
 	}
+}
+
+// evict 淘汰一条流：摘掉并释放缓冲，另记一次淘汰计数。
+func (r *Reassembler) evict(s *stream) {
+	if s == nil {
+		return
+	}
+	r.dropStream(s)
 	r.evictions++
 }
 
