@@ -73,8 +73,8 @@ func TestTranslate(t *testing.T) {
 			t.Errorf("Conditions[%d].Kind = %q，期望 %q", i, c.Kind, rule.CondContent)
 		}
 	}
-	if cr.Match.Conditions[0].Buffer != rule.BufPayload || cr.Match.Conditions[0].Flags&rule.FlagNoCase == 0 {
-		t.Errorf("Conditions[0] = %+v，期望 Buffer=%q 且带 FlagNoCase", cr.Match.Conditions[0], rule.BufPayload)
+	if cr.Match.Conditions[0].Buffer != rule.BufStream || cr.Match.Conditions[0].Flags&rule.FlagNoCase == 0 {
+		t.Errorf("Conditions[0] = %+v，期望 Buffer=%q 且带 FlagNoCase", cr.Match.Conditions[0], rule.BufStream)
 	}
 	if cr.Match.Conditions[1].Buffer != rule.BufHTTPURI {
 		t.Errorf("Conditions[1].Buffer = %q，期望 %q", cr.Match.Conditions[1].Buffer, rule.BufHTTPURI)

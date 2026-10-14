@@ -262,3 +262,45 @@ A 组 23 行、B 组 20 行 stdout 完全一致（唯一差异是我自己指定
 ★ 顺带记一个**干净的变异手法**（trae 本次自己用的，值得沿用）：
 `go test -overlay <overlay.json>` —— 用 JSON 把某个 `.go` 文件映射到仓库外的一份改过的副本，
 **完全不碰仓库源码**就能做变异检验（比"改完再恢复"安全得多）。
+
+### 12.9 11-2 已落地：`alert tcp` 的默认粘性缓冲翻成 `stream`
+
+生产改动只有一处：`internal/modules/rule/kw/frame.go` 的 `NewState` 用
+`defaultStickyBuf(r.Match.Proto)` 决定 `CurBuf`（`alert tcp` → `stream`；其它协议 → `payload`）。
+
+**语义切换的"精确改动面"（这是本次验收的核心判据）**：翻译器 golden
+`internal/modules/rule/pipeline/testdata/basic.golden.json` 重生成前后：
+
+| buffer | 改前 | 改后 |
+|---|---|---|
+| `payload` | 9 | **0** |
+| `stream` | 0 | **9** |
+| `http_uri` | 4 | **4**（不变） |
+| `http_header` | 2 | **2**（不变） |
+| `dns_query` | 2 | **2**（不变） |
+
+⇒ diff 里**只出现 `payload → stream`**，显式缓冲关键字（`http_uri` / `http_header` / `dns_query`）
+的计数一个都没动 ✓ —— 这正是"翻默认"应有的影响面。
+
+**端到端三组（改前 → 改后）**：
+
+| 组 | 规则 | 改前 | 改后 |
+|---|---|---|---|
+| A | 显式 `stream;` | 13 命中 / 写入 4 / 压制 9 | **13 / 4 / 9**（不变）✓ |
+| B | **裸规则**（`e2e.rules`） | 10 / 4 / 6 | ★ **13 / 4 / 9**（13 条命中**全部** `缓冲=stream`）✓ |
+| C | 显式 `payload;` | 10 / 4 / 6 | **10 / 4 / 6**（不变）✓ |
+
+**三处夹具按新语义改写**（不是放宽断言，而是"裸规则"不再等于"未引用 stream"）：
+`detect/ruleset_test.go: TestUsesBufferFile`、`hotpath/hotpath_test.go: TestNewSkipsReassemblyWhenUnused`、
+`detect/e2e_test.go: TestE2ECaptureToDetect`（它不接重组器、`Ctx.Stream` 恒为 nil，故必须显式 `payload;`）
+—— 三处的断言都**原样不动**，只把夹具从"裸 `alert tcp`"换成"显式 `payload;`"。
+
+**"甲"方案落实**：旧 `default.golden`（10 行 payload）另存为 `default-v1-payload.golden`
+（文件头加 2 行说明"11-2 前的历史对照物、不参与比对；可执行等价物见 `explicit-payload.golden`"），
+新的 `default.golden` 记录 stream 语义（13 行）。换默认前后的行为因此**永久留在仓库里**。
+
+★★ **一条流程教训（本任务暴露的）**：PM 的影响清单是**用 grep `BufPayload` 反推**出来的，
+**漏掉了 `internal/modules/detect/e2e_test.go`**（它用 `LoadFile` 而不是字面量 `BufPayload`，
+所以 grep 不到）—— 是 trae 跑全量测试时才发现并顺手修对的。
+⇒ **改语义类任务的影响面，不能只靠关键字 grep**：正确做法是**先在仓库外副本里把改动做一遍、
+跑全量测试，用"红名单"反推影响面**，再把这份名单写进 prompt（见踩坑记录 坑 25）。

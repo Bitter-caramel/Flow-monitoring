@@ -18,7 +18,7 @@
         "conditions": [
           {
             "kind": "content",
-            "buffer": "payload",
+            "buffer": "stream",
             "value": "union select",
             "flags": 1,
             "offset": 0,
@@ -54,7 +54,7 @@
       "matchers": [
         {
           "kind": "content",
-          "buffer": "payload",
+          "buffer": "stream",
           "content": "union select",
           "lower": "union select",
           "regex": "",
@@ -209,7 +209,7 @@
         "conditions": [
           {
             "kind": "content",
-            "buffer": "payload",
+            "buffer": "stream",
             "value": "GET ",
             "flags": 0,
             "offset": 0,
@@ -230,7 +230,7 @@
       "matchers": [
         {
           "kind": "content",
-          "buffer": "payload",
+          "buffer": "stream",
           "content": "GET ",
           "lower": "",
           "regex": "",
@@ -261,7 +261,7 @@
         "conditions": [
           {
             "kind": "content",
-            "buffer": "payload",
+            "buffer": "stream",
             "value": "SMB",
             "flags": 0,
             "offset": 0,
@@ -281,7 +281,7 @@
       "matchers": [
         {
           "kind": "content",
-          "buffer": "payload",
+          "buffer": "stream",
           "content": "SMB",
           "lower": "",
           "regex": "",
@@ -312,7 +312,7 @@
         "conditions": [
           {
             "kind": "content",
-            "buffer": "payload",
+            "buffer": "stream",
             "value": "ok",
             "flags": 0,
             "offset": 0,
@@ -320,7 +320,7 @@
           },
           {
             "kind": "pcre",
-            "buffer": "payload",
+            "buffer": "stream",
             "value": "/(?=x)y/",
             "flags": 0,
             "offset": 0,
@@ -340,7 +340,7 @@
       "matchers": [
         {
           "kind": "content",
-          "buffer": "payload",
+          "buffer": "stream",
           "content": "ok",
           "lower": "",
           "regex": "",

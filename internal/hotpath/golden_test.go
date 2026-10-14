@@ -25,8 +25,9 @@ type goldenHit struct {
 
 // TestGoldenHits 引擎级 golden：规则集 + test.pcapng 经生产真路径 hotpath.Process 的命中行与 .golden 逐行比对。
 // 三组锁：explicit-payload=10 命中全 payload；explicit-stream=13（含 IPv6）全 stream；default=裸规则命中>0 且 buf 一致。
-// ★ default.golden 是 11-2「翻默认缓冲」信号线：11-2 落地时把旧文件改名 default-v1-payload.golden 永久保留、
-// 再 -update 生成新文件。行格式 No=<PktNo> sid=<RuleID> buf=<Buffer> off=<Offset> snip=<%q>，不含时间/绝对路径/耗时；
+// ★ default.golden 是 11-2「翻默认缓冲」信号线：11-2 落地时把旧文件另存为 default-v1-payload.golden 永久保留、
+// 再 -update 生成新文件。default-v1-payload.golden 是 11-2 前的历史对照物（不参与比对），
+// 11-2 后 default.golden 记录 stream 语义。行格式 No=<PktNo> sid=<RuleID> buf=<Buffer> off=<Offset> snip=<%q>，不含时间/绝对路径/耗时；
 // golden 是生成物，只在人工确认变动合理后用 -update 更新。
 func TestGoldenHits(t *testing.T) {
 	cases := []struct {

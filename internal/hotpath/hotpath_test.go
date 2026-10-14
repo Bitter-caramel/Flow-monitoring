@@ -15,11 +15,11 @@ import (
 // TestNewSkipsReassemblyWhenUnused 验证 11-4 的"跳过优化"：
 // 规则集里没有任何条件引用 stream 缓冲时，New 不应建重组器。
 func TestNewSkipsReassemblyWhenUnused(t *testing.T) {
-	rs := detect.LoadText(`alert tcp any any -> any any (msg:"x"; pcre:"/./"; sid:950001;)`)
+	rs := detect.LoadText(`alert tcp any any -> any any (msg:"x"; payload; pcre:"/./"; sid:950001;)`)
 	hp := New(rs)
 	defer hp.Close()
 	if hp.Reassembles() {
-		t.Fatal("裸规则（未引用 stream）不应建重组器，Reassembles() 应为 false")
+		t.Fatal("显式 payload 规则（未引用 stream）不应建重组器，Reassembles() 应为 false")
 	}
 }
 

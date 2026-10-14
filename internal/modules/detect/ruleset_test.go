@@ -110,13 +110,11 @@ func TestLoadTextEmpty(t *testing.T) {
 	}
 }
 
-// TestUsesBufferFile 验证从 e2e.rules 载入后 UsesBuffer 的判定：
-// 这些规则默认用 payload，没有任何条件引用 stream。
+// TestUsesBufferFile 验证载入显式 `payload;` 规则后 UsesBuffer 的判定：
+// 11-2 起裸 alert tcp 默认用 stream，故夹具改用显式 payload; 的内联文本，
+// 断言仍是「引用 payload、不引用 stream」。
 func TestUsesBufferFile(t *testing.T) {
-	rs, err := LoadFile(filepath.Join("testdata", "e2e.rules"))
-	if err != nil {
-		t.Fatalf("LoadFile 失败: %v", err)
-	}
+	rs := LoadText(`alert tcp any any -> any any (msg:"x"; payload; pcre:"/./"; sid:930010;)`)
 	if !rs.UsesBuffer(rule.BufPayload) {
 		t.Error("UsesBuffer(rule.BufPayload) 应为 true")
 	}

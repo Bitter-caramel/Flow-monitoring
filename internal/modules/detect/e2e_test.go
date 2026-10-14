@@ -14,11 +14,12 @@ import (
 // 用仓库根 testdata 下的真实样本跑通整条流水线，并断言规则命中情况符合预期
 // （命中规则至少命中若干次，永不匹配/端口不匹配的规则零命中）。
 func TestE2ECaptureToDetect(t *testing.T) {
-	// a) 加载测试规则文件，确认三条规则全部编译成功。
-	rs, err := LoadFile(filepath.Join("testdata", "e2e.rules"))
-	if err != nil {
-		t.Fatalf("加载规则文件失败: %v", err)
-	}
+	// a) 加载测试规则文本并确认三条规则全部编译成功。
+	//    11-2 起裸 alert tcp 默认粘性缓冲是 stream，而本测试不接重组器（Ctx.Stream 恒为 nil），
+	//    故夹具显式写 payload; 保持「单包匹配」语义，断言不变。
+	rs := LoadText(`alert tcp any any -> any any (msg:"e2e-any-payload"; payload; pcre:"/./"; sid:300001;)
+alert tcp any any -> any any (msg:"e2e-never-match"; payload; content:"NEVER-APPEARS-IN-SAMPLE-XYZ"; sid:300002;)
+alert tcp any any -> any 1 (msg:"e2e-port-miss"; payload; pcre:"/./"; sid:300003;)`)
 	if rs == nil || rs.Report == nil {
 		t.Fatal("规则导入结果为 nil（期望获得 RuleSet 及其 Report）")
 	}
