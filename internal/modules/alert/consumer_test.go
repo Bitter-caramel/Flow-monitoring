@@ -1,6 +1,7 @@
 package alert
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -190,5 +191,68 @@ func TestConsumerCloseStops(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if c.Written() != 1 {
 		t.Fatalf("Close 后不应再写, 实际 Written=%d", c.Written())
+	}
+}
+
+// TestConsumerCloseDrainsBuffered 守住：Close 必须等消费循环把订阅 channel
+// 里已缓冲的事件排空后才返回，不能让 CLI 退出时丢掉已投递但未消费的告警。
+func TestConsumerCloseDrainsBuffered(t *testing.T) {
+	bus := eventbus.New()
+	defer bus.Close()
+	sink := &fakeSink{}
+	c := NewConsumerFromBus(bus, TopicAlertLifecycle, 0, sink, ConsumerOptions{})
+
+	// 连续投递 20 条不同键（RuleID/StreamID 均不同）的告警，保证不被去重压制。
+	for i := 0; i < 20; i++ {
+		if err := bus.Publish(TopicAlertLifecycle, evFor(fmt.Sprintf("r%d", i), i, "drain")); err != nil {
+			t.Fatalf("Publish 第 %d 条失败: %v", i, err)
+		}
+	}
+
+	// 立刻 Close（不等、不轮询）：Close 返回后计数必须是终值。
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close 失败: %v", err)
+	}
+	if got := c.Written(); got != 20 {
+		t.Fatalf("Close 后 Written 期望 20, 实际 %d（缓冲事件被丢弃）", got)
+	}
+	if got := sink.snapshot(); len(got) != 20 {
+		t.Fatalf("sink 期望 20 条, 实际 %d 条（缓冲事件被丢弃）", len(got))
+	}
+}
+
+// TestConsumerCloseDrainsBufferedSmallBuffer 守住：订阅缓冲很小（4）时，
+// Close 仍要把缓冲里剩余事件排空，20 条一条不丢。
+func TestConsumerCloseDrainsBufferedSmallBuffer(t *testing.T) {
+	bus := eventbus.New()
+	defer bus.Close()
+	sink := &fakeSink{}
+	c := NewConsumerFromBus(bus, TopicAlertLifecycle, 4, sink, ConsumerOptions{})
+
+	// 小缓冲下若一口气投递，总线会在缓冲满时丢弃（Publish 非阻塞），
+	// 那就测不到 Close 了。故先逐条投递前 16 条并各等到被消费（缓冲因此
+	// 始终有空位），再一口气投递最后 4 条（恰好填满 4 格缓冲）后立刻 Close，
+	// 验证 Close 会把缓冲里剩余事件排空。
+	for i := 0; i < 16; i++ {
+		if err := bus.Publish(TopicAlertLifecycle, evFor(fmt.Sprintf("s%d", i), i, "small")); err != nil {
+			t.Fatalf("Publish 第 %d 条失败: %v", i, err)
+		}
+		want := uint64(i + 1)
+		waitFor(t, fmt.Sprintf("Written==%d", want), func() bool { return c.Written() == want })
+	}
+	for i := 16; i < 20; i++ {
+		if err := bus.Publish(TopicAlertLifecycle, evFor(fmt.Sprintf("s%d", i), i, "small")); err != nil {
+			t.Fatalf("Publish 第 %d 条失败: %v", i, err)
+		}
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close 失败: %v", err)
+	}
+	if got := c.Written(); got != 20 {
+		t.Fatalf("Close 后 Written 期望 20, 实际 %d（小缓冲事件被丢弃）", got)
+	}
+	if got := sink.snapshot(); len(got) != 20 {
+		t.Fatalf("sink 期望 20 条, 实际 %d 条（小缓冲事件被丢弃）", len(got))
 	}
 }

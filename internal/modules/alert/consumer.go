@@ -96,18 +96,39 @@ func newConsumer(ch <-chan eventbus.Event, sink Sink, opts ConsumerOptions, bus 
 	return c
 }
 
-// loop 是消费循环：done 关闭或 channel 关闭都退出。
+// loop 是消费循环：done 关闭（仅"不拥有 channel"时用于打断）或 channel
+// 关闭都退出；退出前会把 channel 里当前缓冲的事件排空（best effort）。
 func (c *Consumer) loop(ch <-chan eventbus.Event) {
 	defer c.wg.Done()
 	for {
 		select {
 		case <-c.done:
+			c.drain(ch)
 			return
 		case ev, ok := <-ch:
 			if !ok {
 				return
 			}
 			c.consume(ev)
+		}
+	}
+}
+
+// drain 非阻塞地把 ch 当前缓冲里剩余的事件消费干净后返回（best effort）。
+//
+// 关闭后的 channel 仍会先把缓冲里的值读完，最后才返回 ok=false，因此
+// "拥有订阅"的分支由 Unsubscribe close(ch) 后 loop 走 <-ch 的 ok=false
+// 自然退出；本函数只用于"不拥有 channel"、无法退订时的兜底排空。
+func (c *Consumer) drain(ch <-chan eventbus.Event) {
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			c.consume(ev)
+		default:
+			return
 		}
 	}
 }
@@ -157,16 +178,33 @@ func (c *Consumer) Written() uint64 { return c.written.Load() }
 // Suppressed 返回被去重压制的告警数（仅内存计数，P0 不落盘）。
 func (c *Consumer) Suppressed() uint64 { return c.suppressed.Load() }
 
-// Close 停止消费（关 done + 等循环退出）+ 若订阅由它创建则退订 + sink.Close()。
+// Close 停止消费、排空已投递事件、关闭落点。顺序：
+//
+//	① 若订阅由本消费者创建：先 Unsubscribe（它会 close(ch)）。
+//	   ★ Go 里关闭后的 channel 仍会先把缓冲里的值读完，最后才返回 ok=false，
+//	   因此消费循环会先把剩余事件排空，再自然退出。
+//	② 等消费循环把剩余事件排空并自然退出（wg.Wait）；此后计数才是终值。
+//	③ 最后 sink.Close()。
+//
+// 对"不拥有 channel"的 NewConsumer(ch, ...) 分支：没有订阅可退，改用 done
+// 打断消费循环，由循环在退出前对 ch 当前缓冲做一次 best-effort 非阻塞排空
+// （不 close(ch)——该 channel 不归它所有），这条语义即为该分支的兜底约定。
+//
+// done 仍保留（非拥有 channel 时用它打断），但不能在排空之前就打断消费循环。
 //
 // 幂等：重复调用返回同一结果。
 func (c *Consumer) Close() error {
 	c.closeOnce.Do(func() {
-		close(c.done)
-		c.wg.Wait() // 保证返回后消费循环已退出（确定性）
 		if c.sub != nil && c.bus != nil {
+			// ① 先退订：close(ch) 后循环会把缓冲读空再退出；本分支不关 done。
 			c.bus.Unsubscribe(c.sub)
+		} else {
+			// 非拥有 channel：用 done 打断，循环退出前做 best-effort 排空。
+			close(c.done)
 		}
+		// ② 等消费循环把剩余事件排空并自然退出（确定性）。
+		c.wg.Wait()
+		// ③ 最后关落点。
 		if c.sink != nil {
 			c.closeErr = c.sink.Close()
 		}

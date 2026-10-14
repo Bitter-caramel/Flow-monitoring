@@ -5,11 +5,12 @@
 //
 // 用法：
 //
-//	parse-cli <file.pcapng> [--limit N] [--analyze] [--top N] [--detect <规则文件>]
+//	parse-cli <file.pcapng> [--limit N] [--analyze] [--top N] [--detect <规则文件>] [--alerts <文件>]
 //
 // 输出列：No / 时间 / 源 → 目的 / 协议 / 长度 / INFO
 // 开启 --analyze 后不再逐包打印，改为输出流聚合/协议/端点/端口四段统计。
 // 开启 --detect 后加载规则文件做检测，不逐包打印，仅打印命中行与告警汇总。
+// 配合 --alerts 时把告警写成 JSON Lines 文件。
 package main
 
 import (
@@ -17,9 +18,12 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 
 	"flow-monitoring/internal/kernel/datamodel"
+	"flow-monitoring/internal/kernel/eventbus"
+	"flow-monitoring/internal/modules/alert"
 	"flow-monitoring/internal/modules/detect"
 	"flow-monitoring/internal/modules/parse/analyzer"
 	"flow-monitoring/internal/modules/parse/decoder"
@@ -31,6 +35,7 @@ func main() {
 	analyze := flag.Bool("analyze", false, "启用流聚合分析（不逐包打印）")
 	top := flag.Int("top", 10, "排行榜显示条数")
 	detectPath := flag.String("detect", "", "载入规则文件并做检测（如 --detect rules.rules）")
+	alertsPath := flag.String("alerts", "", "把告警写成 JSON Lines 到该文件（配合 --detect）")
 	flag.Parse()
 
 	// Go 的 flag 包默认在首个位置参数（文件名）处停止解析，
@@ -43,13 +48,17 @@ func main() {
 	}
 
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "用法: parse-cli <file.pcapng> [--limit N] [--analyze] [--top N] [--detect <规则文件>]")
+		fmt.Fprintln(os.Stderr, "用法: parse-cli <file.pcapng> [--limit N] [--analyze] [--top N] [--detect <规则文件>] [--alerts <文件>]")
 		os.Exit(1)
 	}
 	path := args[0]
 
-	// --detect：载入规则文件并构建检测引擎（检测也依赖流归属）。
+	// --detect：载入规则文件并构建检测引擎（检测也依赖流归属）；
+	// 同时接线告警链路：事件总线 -> 消费者 -> JSONL 落盘。
 	var eng *detect.Engine
+	var bus *eventbus.Bus
+	var cons *alert.Consumer
+	captureID := ""
 	if *detectPath != "" {
 		rs, err := detect.LoadFile(*detectPath)
 		if err != nil {
@@ -59,6 +68,23 @@ func main() {
 		fmt.Print(rs.Report.String())
 		fmt.Println()
 		eng = rs.Engine()
+
+		captureID = filepath.Base(path)
+		bus = eventbus.New()
+		defer bus.Close()
+
+		// --alerts 非空才落盘；否则 sink 传 nil（Consumer 支持 nil sink）。
+		var sink alert.Sink
+		if *alertsPath != "" {
+			fs, err := alert.NewFileSink(*alertsPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "打开告警文件失败: %v\n", err)
+				os.Exit(1)
+			}
+			sink = fs
+		}
+		cons = alert.NewConsumerFromBus(bus, alert.TopicAlertLifecycle, 4096, sink, alert.ConsumerOptions{})
+		defer cons.Close()
 	}
 
 	data, err := os.ReadFile(path)
@@ -127,6 +153,11 @@ func main() {
 				fmt.Printf("[命中] No=%d 时间=%s %s:%d → %s:%d 规则=%s(%s) 缓冲=%s 偏移=%d 片段=%q\n",
 					p.No, formatTime(p), p.Src, p.SrcPort, p.Dst, p.DstPort,
 					h.RuleID, h.Name, h.Buffer, h.Offset, h.Snippet)
+
+				// 发布告警到总线（消费者异步去重后落盘）；发布失败只告警，不中断扫描。
+				if err := bus.Publish(alert.TopicAlertLifecycle, alert.Event{CaptureID: captureID, Alert: h}); err != nil {
+					fmt.Fprintf(os.Stderr, "发布告警失败: %v\n", err)
+				}
 			}
 			continue
 		}
@@ -169,6 +200,15 @@ func main() {
 		fmt.Printf("=== 检测结果：命中 %d 次，涉及 %d 条规则 ===\n", alertTotal, len(groups))
 		for _, g := range groups {
 			fmt.Printf("规则 %s (%s) 命中 %d 次\n", g.ID, g.Name, g.Count)
+		}
+
+		// 显式关闭消费者以冲刷落盘（Close 由 sync.Once 保护，defer 再调安全）。
+		if cons != nil {
+			_ = cons.Close()
+			if *alertsPath != "" {
+				fmt.Printf("告警已写入 %s（写入 %d 条，去重压制 %d 条）\n",
+					*alertsPath, cons.Written(), cons.Suppressed())
+			}
 		}
 	}
 
