@@ -152,6 +152,50 @@ type StreamView interface {
 更小序号的段被直接丢弃**（探针实测 `[C,A,B]` 只剩 `CCCC`）；以及 `ReassemblyComplete` 恒返回 `true`
 的策略复核。
 
+### 7.3 11-6c 诊断结论（把缺陷钉成断言 + gopacket 源码溯源）
+
+11-6c 只加测试、不改生产代码（`internal/modules/reassembly/midstream_test.go`，6 条），
+把下面的事实钉成了可执行断言：
+
+**根因链（gopacket v1.7.4 `reassembly/tcpassembly.go`，行号已核）**
+
+| 行 | 代码 | 含义 |
+|---|---|---|
+| 662 | `a.start = half.nextSeq == invalidSequence && t.SYN` | gopacket 自己的默认：**只有看到 SYN 才起流** |
+| 669 | `if !half.stream.Accept(..., &a.start, ac)` | 我们的 `Accept` **无条件 `*start = true`**，覆盖了它 |
+| 693-711 | `if half.nextSeq == invalidSequence { if t.SYN {nextSeq = SYN.seq+1} else if a.start {nextSeq = 本段 seq} else {"waiting for start"} }` | ⇒ **基准（`nextSeq`）= 首个触发起流的段的 seq** |
+| 712-724 | `diff := half.nextSeq.Difference(seq); if diff > 0 { "...gap in sequence numbers...storing into connection" }` | 落在基准**之前**的段被**排队**（不是立刻丢弃） |
+| — | 交付/Flush 都从 `nextSeq` **向前**走 | ⇒ **基准之前排队的段永远不会被交付**（真正的"静默丢失"） |
+
+**决定性对照（同一批段、只差有没有 SYN）**
+
+| 场景 | `View` | 结论 |
+|---|---|---|
+| **有真 SYN**，之后 `[C,A,B]` | `AAAABBBBCCCC` | ★ **乱序被正确处理**（基准 = SYN.seq+1 = 真实起点，没有"基准之前的段"） |
+| **无 SYN**，`[A,C,B]`（最小段先到） | `AAAABBBBCCCC` | ✓ 恰好蒙对（首个观察段就是最小段） |
+| **无 SYN**，`[C,A,B]`（高序号先到） | `CCCC` | ✗ 基准被钉在 1009 ⇒ A、B 搁浅 |
+| **无 SYN**，首段是高序号**空载荷**段 | ``（空） | ✗ 基准被钉在空段 seq，后续全部搁浅 |
+
+⇒ ★★ **缺陷只影响"没抓到 SYN 的中途流"**（span/镜像口部署的常见情况）；只要看到 SYN，gopacket 的
+基准就是真实起点，乱序能自愈。
+
+**另一条独立缺陷（同批测出）**：`stream.ReassemblyComplete` **恒返回 `true`** ⇒ 双向 FIN 之后
+连接被移出池，**但我们的 `byKey`/`byID` 仍持有已关闭的旧 stream**（测试日志：`池已 remove，但我们
+byKey 仍持旧 stream=true`）。后果：同一四元组复用时旧缓冲会被误当成"当前流"（直到被新流替换），
+且旧缓冲要等 `MemCap` 淘汰才释放。
+
+**候选修法（待拍板，11-6c 里只诊断不实现）**
+
+| 方案 | 做法 | 代价 / 风险 |
+|---|---|---|
+| **(A) 预缓冲起流** | 对无 SYN 的新连接先缓存前 K 个段（帧都还在），确定最小 seq 后**先喂最小段触发起流**、再按序回放缓冲 | ★ 最彻底，但要自己缓冲/回放，且前 K 段的 `stream` 视图会缺失；与 Flush/跳过优化有交互，复杂度最高 |
+| **(B) 检测层兜底** | `stream` 为空/该包数据不在视图里时回落到 `payload` | 简单、彻底防漏；但**改变匹配语义**（同一条规则可能在两种缓冲上命中，要定义优先级） |
+| **(C) 只看有 SYN 的流用 `stream`** | 重组器标记"是否见过 SYN"，`extractStream` 对**中途流回落到 `payload`** | ★ (B) 的干净变体：语义清晰（"能重组的用 stream，抓不到起点的用 payload"）；实现点在检测层，不动重组核心 |
+| **(D) 修 `ReassemblyComplete` 策略** | 不再恒 `true`；FIN/超时后才允许移出，并同步清理 `byKey`/`byID` | 独立小修，治的是"陈旧指针 + 缓冲滞留"；与上面的方案正交 |
+
+★ **PM 建议**：**先做 (C) + (D)**（防漏 + 清理陈旧引用，风险可控、语义清晰、可测），
+把 **(A)** 记为 P2 备选（要做就得连带处理"预缓冲期的检测语义"），**(B)** 与 (C) 二选一即可。
+
 ## 8. 顺带解锁：整条连接级证据（10-4 的 P1）
 
 有了按流字节流后，证据可从"时间窗"升级为"**整条连接**"：命中的流 → 导出该流的**全部包**
