@@ -404,3 +404,84 @@ func TestTransportNameKeepsFlowKeyStable(t *testing.T) {
 		t.Fatalf("FlowKey 期望 %q, 实际 %q", want, httpAlerts[0].FlowKey)
 	}
 }
+
+// fakeStream 是 StreamView 的测试替身：两个方向各自返回不同字节。
+type fakeStream struct {
+	toServer []byte
+	toClient []byte
+}
+
+func (f fakeStream) BytesToServer() []byte { return f.toServer }
+func (f fakeStream) BytesToClient() []byte { return f.toClient }
+
+// TestStreamExtractorNilStream 守的是：没有重组器（Ctx.Stream == nil）时 stream 提取器
+// 必须返回 nil（缓冲区不存在），且以 stream 为唯一条件的规则整条不匹配（§5.4）。
+func TestStreamExtractorNilStream(t *testing.T) {
+	ex := extOf(t, rule.Buffer("stream"))
+	if got := ex(&Ctx{Pkt: payloadPkt("x")}); got != nil {
+		t.Fatalf("Ctx.Stream 为 nil 应返回 nil, got=%q", got)
+	}
+	prog := &Program{
+		ID: "r-stream-nil", Proto: rule.ProtoAny, SrcPort: anyPort(), DstPort: anyPort(),
+		Conds: []Cond{{Kind: rule.CondContent, Extract: ex, Buf: rule.Buffer("stream"), Content: []byte("x")}},
+	}
+	// 包载荷里有 "x"，但 stream 缓冲区不存在 ⇒ 整条不匹配（缓冲区不存在 ⇒ 不匹配）。
+	if got := NewEngine([]*Program{prog}).Match(&Ctx{Pkt: payloadPkt("x")}); len(got) != 0 {
+		t.Fatalf("stream 缓冲区不存在时规则必须整条不匹配, got=%d", len(got))
+	}
+}
+
+// TestStreamExtractorDirection 守的是：按包所在方向选流视图 ——
+// StreamDir=0 取 to_server、StreamDir=1 取 to_client，且直接返回上游切片（不复制）。
+func TestStreamExtractorDirection(t *testing.T) {
+	ex := extOf(t, rule.Buffer("stream"))
+	sv := fakeStream{toServer: []byte("TO_SERVER"), toClient: []byte("TO_CLIENT")}
+
+	pktSrv := payloadPkt("")
+	pktSrv.StreamDir = 0
+	gotSrv := ex(&Ctx{Pkt: pktSrv, Stream: sv})
+	if string(gotSrv) != "TO_SERVER" {
+		t.Fatalf("StreamDir=0 应取 to_server, got=%q", gotSrv)
+	}
+
+	pktCli := payloadPkt("")
+	pktCli.StreamDir = 1
+	gotCli := ex(&Ctx{Pkt: pktCli, Stream: sv})
+	if string(gotCli) != "TO_CLIENT" {
+		t.Fatalf("StreamDir=1 应取 to_client, got=%q", gotCli)
+	}
+
+	// 不复制：改动上游底层数组，提取器返回的切片应随之变化。
+	sv.toServer[0] = 'X'
+	if gotSrv[0] != 'X' {
+		t.Fatalf("extractStream 应直接返回上游切片（不复制）")
+	}
+}
+
+// TestStreamExtractorEmptyIsNil 守的是：某方向返回空切片时提取器返回 nil
+// （空数据等同缓冲区不存在，与既有提取器一致）。
+func TestStreamExtractorEmptyIsNil(t *testing.T) {
+	ex := extOf(t, rule.Buffer("stream"))
+
+	// to_server 为 nil
+	pktSrv := payloadPkt("")
+	pktSrv.StreamDir = 0
+	if got := ex(&Ctx{Pkt: pktSrv, Stream: fakeStream{toServer: nil, toClient: []byte("C")}}); got != nil {
+		t.Fatalf("to_server 为空应返回 nil, got=%q", got)
+	}
+
+	// to_client 非 nil 但 len==0
+	pktCli := payloadPkt("")
+	pktCli.StreamDir = 1
+	if got := ex(&Ctx{Pkt: pktCli, Stream: fakeStream{toServer: []byte("S"), toClient: []byte{}}}); got != nil {
+		t.Fatalf("to_client 长度为 0 应返回 nil, got=%q", got)
+	}
+}
+
+// TestStreamBufferRegistered 守的是："stream" 已注册进缓冲区表，
+// 防止注册漏掉导致规则里的 stream 静默失效。
+func TestStreamBufferRegistered(t *testing.T) {
+	if _, ok := LookupBuffer(rule.Buffer("stream")); !ok {
+		t.Fatal(`缓冲区 "stream" 未注册`)
+	}
+}
