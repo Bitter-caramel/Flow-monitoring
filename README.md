@@ -84,6 +84,7 @@ go run ./cmd/parse-cli testdata/test.pcapng
 | [`docs/规则翻译器扩展指南.md`](docs/规则翻译器扩展指南.md) | 加关键字的改动地图 + 插件化搬家蓝图 |
 | [`docs/检测引擎.md`](docs/检测引擎.md) | 检测引擎设计：`Ctx` / 缓冲区提取器 / 匹配语义 / 两次编译 / 性能红线 / P0 边界 |
 | [`docs/告警与收集.md`](docs/告警与收集.md) | 告警的事件线 / sink（JSONL 与 PG）/ 精准收集（环形缓冲 + 证据 pcapng）/ 最小去重 |
+| [docs/TCP重组.md](docs/TCP重组.md) | TCP 重组的接入点、匹配语义（stream vs pkt_data）、资源红线、测试策略 |
 
 ---
 
