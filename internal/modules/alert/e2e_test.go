@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"flow-monitoring/internal/hotpath"
 	"flow-monitoring/internal/kernel/eventbus"
 	"flow-monitoring/internal/modules/alert"
 	"flow-monitoring/internal/modules/detect"
-	"flow-monitoring/internal/modules/parse/analyzer"
 	"flow-monitoring/internal/modules/parse/decoder"
 	"flow-monitoring/internal/modules/parse/pcapng"
 )
@@ -24,7 +24,8 @@ func TestE2EAlertToJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("加载规则文件失败: %v", err)
 	}
-	eng := rs.Engine()
+	hp := hotpath.New(rs)
+	defer hp.Close()
 
 	// b) 读取并解析仓库根 testdata 下的真实样本。
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "test.pcapng"))
@@ -53,7 +54,6 @@ func TestE2EAlertToJSONL(t *testing.T) {
 
 	// d) 逐包执行：解码 → 归流 → 检测，并把每条命中发布到真实总线。
 	hits := 0
-	az := analyzer.New()
 	for _, p := range cap.Packets {
 		if p == nil {
 			continue
@@ -63,8 +63,7 @@ func TestE2EAlertToJSONL(t *testing.T) {
 			linkType = cap.Ifaces[p.Iface].LinkType
 		}
 		decoder.Decode(p, linkType)
-		flow := az.FeedFlow(p)
-		for _, h := range eng.Match(&detect.Ctx{Pkt: p, Flow: flow}) {
+		for _, h := range hp.Process(p) {
 			hits++
 			if err := bus.Publish(alert.TopicAlertLifecycle, alert.Event{CaptureID: "e2e", Alert: h}); err != nil {
 				t.Fatalf("发布告警失败: %v", err)

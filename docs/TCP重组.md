@@ -214,3 +214,20 @@ No=16 的 IPv4 / No=18 另一条 IPv6 流），且 **写入 + 压制 = 命中** 
 
 仍待做（P1）：`StreamID` 在 IPv6 上依旧是 -1（本次只是让**去重键**不再塌陷），
 要让 IPv6 真正拥有流身份（流聚合、统计、去重都靠它），仍需 `analyzer` 支持 IPv6 归流。
+
+### 12.7 热路径编排已收敛到 `internal/hotpath`（11-5a）
+
+「归流 → 重组 → 检测」这条编排（含**顺序红线**与 11-4 的"未引用 `stream` 就不建重组器"跳过优化）
+原来写在 `cmd/parse-cli/main.go` 里，而 `internal/modules/alert/e2e_test.go` **又自己抄了一遍**
+（且没接重组器）⇒ 编排被改，测试不会响。
+
+现收敛为 `internal/hotpath`（`New` / `Process` / `Analyzer` / `Engine` / `Reassembles` / `Close`），
+`parse-cli` 与测试**共用同一份实现**。★ 重构后端到端输出**逐字节不变**：
+A 组 23 行、B 组 20 行 stdout 完全一致（唯一差异是我自己指定的 `--alerts` 路径），
+两份告警 JSONL 哈希相同；`--analyze --detect` 同时只用**一个** analyzer 实例。
+
+★★ **一条必须记下的教训（变异检验抓到的）**：`internal/hotpath/hotpath_test.go` 的
+`TestProcessFeedsReassemblyBeforeMatch` 名字与注释都声称"顺序写反就会红"，但实测**把
+`Feed`/`Match` 换序后它照样通过**（命中 13 → 6，仍 > 0 ⇒ `streamHits > 0` 这条断言守不住顺序）✗。
+⇒ **"≥1 / >0" 这类弱断言几乎守不住任何东西**；新的回归网必须做一次**故意破坏（变异）检验**，
+否则你不知道它守的是不是空气。严格的顺序锁改由 11-5b 的 golden（逐行精确比对）承担。

@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"flow-monitoring/internal/hotpath"
 	"flow-monitoring/internal/kernel/datamodel"
 	"flow-monitoring/internal/kernel/eventbus"
 	"flow-monitoring/internal/modules/alert"
@@ -28,8 +29,6 @@ import (
 	"flow-monitoring/internal/modules/parse/analyzer"
 	"flow-monitoring/internal/modules/parse/decoder"
 	"flow-monitoring/internal/modules/parse/pcapng"
-	"flow-monitoring/internal/modules/reassembly"
-	"flow-monitoring/internal/modules/rule"
 )
 
 func main() {
@@ -57,10 +56,9 @@ func main() {
 
 	// --detect：载入规则文件并构建检测引擎（检测也依赖流归属）；
 	// 同时接线告警链路：事件总线 -> 消费者 -> JSONL 落盘。
-	var eng *detect.Engine
+	var hp *hotpath.Hotpath
 	var bus *eventbus.Bus
 	var cons *alert.Consumer
-	var reasm *reassembly.Reassembler
 	captureID := ""
 	if *detectPath != "" {
 		rs, err := detect.LoadFile(*detectPath)
@@ -70,14 +68,11 @@ func main() {
 		}
 		fmt.Print(rs.Report.String())
 		fmt.Println()
-		eng = rs.Engine()
 
-		// ★ 跳过优化：规则集里没有任何条件引用 stream 缓冲时，完全不建重组器
-		// （零开销）。用了 stream 才 New，并 defer Close。
-		if rs.UsesBuffer(rule.BufStream) {
-			reasm = reassembly.New(reassembly.DefaultOptions())
-			defer reasm.Close()
-		}
+		// ★ 热路径编排收敛到 internal/hotpath：分析器/引擎/重组器由 hp 统一持有，
+		// 其中重组器遵循 11-4 的"跳过优化"（未引用 stream 则不建）。
+		hp = hotpath.New(rs)
+		defer hp.Close()
 
 		captureID = filepath.Base(path)
 		bus = eventbus.New()
@@ -123,15 +118,18 @@ func main() {
 	fmt.Println()
 
 	// 表头（仅在逐包模式下打印）。
-	if !*analyze && eng == nil {
+	if !*analyze && hp == nil {
 		fmt.Printf("%-6s %-18s %-21s %-21s %-9s %-6s %s\n",
 			"No.", "Time", "Source", "Destination", "Protocol", "Length", "Info")
 		fmt.Println("----------------------------------------------------------------------------------------------")
 	}
 
 	// 检测/分析模式都需要流归属。
+	// ★ 检测模式复用 hotpath 内部的分析器（--analyze --detect 同时用时只有这一个实例）。
 	var a *analyzer.Analyzer
-	if *analyze || eng != nil {
+	if *detectPath != "" {
+		a = hp.Analyzer()
+	} else if *analyze {
 		a = analyzer.New()
 	}
 
@@ -148,16 +146,8 @@ func main() {
 		decoder.Decode(p, linkType)
 
 		// 检测模式：归流并匹配规则（不逐包打印）。
-		if eng != nil {
-			var flow *datamodel.Flow
-			if a != nil {
-				flow = a.FeedFlow(p)
-			}
-			// ★ 顺序红线：先把包喂给重组器，再做检测 —— 否则当包看不到自己那段流。
-			if reasm != nil {
-				reasm.Feed(p)
-			}
-			hits := eng.Match(&detect.Ctx{Pkt: p, Flow: flow, Stream: viewOf(reasm, p)})
+		if hp != nil {
+			hits := hp.Process(p)
 			for _, h := range hits {
 				alertTotal++
 				hitsByRule[h.RuleID]++
@@ -195,7 +185,7 @@ func main() {
 	}
 
 	// 收尾 1：检测告警汇总（按规则分组，命中次数降序、同次数规则 ID 升序）。
-	if eng != nil {
+	if hp != nil {
 		type ruleGroup struct {
 			ID    string
 			Name  string
@@ -230,18 +220,6 @@ func main() {
 	if *analyze {
 		printAnalysis(a, *top)
 	}
-}
-
-// viewOf 返回这个包所在流的流视图；没有重组器时返回 nil（= 没有流数据）。
-//
-// ★ 宁可传 nil 也不要传一个空实现：Ctx.Stream 是接口，nil 与「空的流视图」
-// 在引擎里语义一致（都表示缓冲区不存在），但 nil 不引入任何分配，
-// 也不会让引擎误以为「有流数据只是恰好为空」。
-func viewOf(r *reassembly.Reassembler, p *datamodel.Packet) detect.StreamView {
-	if r == nil {
-		return nil
-	}
-	return r.View(p)
 }
 
 // printAnalysis 打印聚合分析结果：流聚合/协议/端点/端口四段。
