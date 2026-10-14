@@ -122,7 +122,21 @@ func (r *Reassembler) Feed(p *datamodel.Packet) {
 	}
 	r.asm.AssembleWithContext(netFlow, tcp, asmContext{})
 
-	key, _ := keyFrom(netFlow.Src().Raw(), netFlow.Dst().Raw(), uint16(tcp.SrcPort), uint16(tcp.DstPort))
+	key, nd := keyFrom(netFlow.Src().Raw(), netFlow.Dst().Raw(), uint16(tcp.SrcPort), uint16(tcp.DstPort))
+
+	// 给「没被归流」的包回写归一化方向。
+	//
+	// 为什么可以回写：keyFrom 用的归一化规则与 analyzer 完全一致（低地址为 A、
+	// 地址相同比端口），nd 就是本包在该坐标下的方向；而 detect.extractStream
+	// 用 p.StreamDir 选方向。analyzer 目前只归 IPv4，IPv6 的 StreamID 恒为 -1、
+	// StreamDir 恒为 0，若不回写，IPv6 反向包也会被当成 A→B，方向就错了。
+	//
+	// 为什么只在 StreamID < 0 时回写：已被 analyzer 归流的包（StreamID >= 0）
+	// 方向由 analyzer 决定，不动它就不会和 IPv4 的既有行为打架。
+	if p.StreamID < 0 {
+		p.StreamDir = nd
+	}
+
 	s := r.byKey[key]
 	if s == nil {
 		return
@@ -346,12 +360,30 @@ func keyFrom(src, dst []byte, sp, dp uint16) (streamKey, uint8) {
 	return streamKey{aIP: ipTo16(dst), aPort: dp, bIP: ipTo16(src), bPort: sp}, 1
 }
 
-// keyFromPacket 用 datamodel 的五元组字段构造 key（IPv4）。
-// 仅用于 View 的退化路径：IPProto 非 TCP 或五元组全空时返回 false。
+// keyFromPacket 用 datamodel 的五元组字段构造 key（IPv4 与 IPv6）。
+// 仅用于 View 的退化路径：IPProto 非 TCP 或五元组不可用时返回 false。
 func keyFromPacket(p *datamodel.Packet) (streamKey, bool) {
 	if p == nil || p.IPProto != 6 {
 		return streamKey{}, false
 	}
+	// IPv6：用字符串地址解析出 16 字节裸地址，与 gopacket 的
+	// EndpointIPv6.Raw()（16 字节）对齐。
+	//
+	// ★ 必须是「真 IPv6」：net.ParseIP("1.2.3.4") 会返回 16 字节的 v4-mapped
+	// （To4() != nil）。若把 v4-mapped 当 IPv6 用，键会是 16 字节，和 gopacket
+	// EndpointIPv4.Raw() 的 4 字节对不上，破坏 IPv4 回归。用 To4()==nil 排除。
+	if p.IPVersion == 6 {
+		src := net.ParseIP(p.SrcIP)
+		dst := net.ParseIP(p.DstIP)
+		if src == nil || dst == nil ||
+			len(src) != net.IPv6len || len(dst) != net.IPv6len ||
+			src.To4() != nil || dst.To4() != nil {
+			return streamKey{}, false
+		}
+		k, _ := keyFrom(src, dst, p.SrcPort, p.DstPort)
+		return k, true
+	}
+	// IPv4（及其它版本值）：保持原有逻辑，确保 IPv4 的键逐字节不变。
 	if p.SrcIPNum == 0 && p.DstIPNum == 0 && p.SrcPort == 0 && p.DstPort == 0 {
 		return streamKey{}, false
 	}

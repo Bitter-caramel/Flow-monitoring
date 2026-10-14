@@ -168,3 +168,25 @@ IPv6 同样能进 `byKey`）——**断点只在"用 StreamID 找回流"这一�
   - (b) 根本解（推荐排期）：`analyzer` 支持 IPv6 归流（`Flow.A/B` 现在是 uint32，需扩展表示），
     一次修好 stream + 流聚合统计 + 告警去重三处。
 - 新增 **11-4c（P0）告警去重键补上 `FlowKey`/五元组**，使 `StreamID == -1` 时不会跨流塌陷。
+
+### 12.5 11-4b 已落地（实测复核）
+
+改动只有两处（`internal/modules/reassembly`）：① `keyFromPacket` 支持 IPv6
+（`net.ParseIP` 取 16 字节、并用 `To4() == nil` 排除 v4-mapped；**IPv4 仍走 4 字节，
+键逐字节不变**）；② `Feed` 在 `p.StreamID < 0`（未被 analyzer 归流）时把归一化方向
+回写 `p.StreamDir`，供 `detect.extractStream` 选方向。
+
+同一个 `stream; pcre:"/./"` 规则，实测：
+
+| | 命中 | 命中的包 | 告警 |
+|---|---|---|---|
+| 修复前 | **1** | 只有 IPv4 的 No=16 | 写入 2 / 压制 11 |
+| 修复后 | **13** | No=2,3,5,6,9,10,11,12,13,14,15,16,18，全部 `缓冲=stream`（含大量 IPv6 流） | 写入 2 / 压制 11 |
+| 默认缓冲回归 `e2e.rules` | 10（未变） | — | 写入 2 / 压制 8 |
+
+★ 注意最后一行：**告警数没变（仍是 2 条）** —— 因为 `StreamID` 在 IPv6 上仍是 -1，
+去重键 `(RuleID, StreamID)` 依旧把 IPv6 的告警全压成一条。这正是 11-4c 要修的东西；
+11-4b 只负责"让 `stream` 在 IPv6 上有数据、方向也对"。
+
+（性能备注：`keyFromPacket` 只在 `View` 的退化路径上被调用，即只有未被归流的包（当前 = IPv6）
+会走它，每包 2 次 `net.ParseIP` 分配；等 `analyzer` 支持 IPv6 归流后这条退化路径会自然退场。）

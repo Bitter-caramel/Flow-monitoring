@@ -261,3 +261,181 @@ func TestReverseDirection(t *testing.T) {
 		t.Fatalf("BytesToClient = %q, want RESP", got)
 	}
 }
+
+// 测试用的固定 IPv6 五元组：A=2001:db8::1（低地址），B=2001:db8::2（高地址）。
+var (
+	testSrc6 = net.ParseIP("2001:db8::1")
+	testDst6 = net.ParseIP("2001:db8::2")
+)
+
+// buildTCPPacket6 与 buildTCPPacket 相同，只是序列化 Ethernet+IPv6+TCP。
+// ★ 同样必须走真实字节：重组器要从帧里解出 TCP 序号。
+func buildTCPPacket6(t *testing.T, srcIP, dstIP net.IP, srcPort, dstPort uint16, seq uint32, fl tcpFlags, payload []byte) *datamodel.Packet {
+	t.Helper()
+
+	ip := &layers.IPv6{
+		Version:    6,
+		HopLimit:   64,
+		NextHeader: layers.IPProtocolTCP,
+		SrcIP:      srcIP.To16(),
+		DstIP:      dstIP.To16(),
+	}
+	tcp := &layers.TCP{
+		SrcPort:    layers.TCPPort(srcPort),
+		DstPort:    layers.TCPPort(dstPort),
+		Seq:        seq,
+		DataOffset: 5,
+		Window:     65535,
+		SYN:        fl.syn,
+		ACK:        fl.ack,
+		FIN:        fl.fin,
+		RST:        fl.rst,
+		PSH:        fl.psh,
+	}
+	if err := tcp.SetNetworkLayerForChecksum(ip); err != nil {
+		t.Fatalf("SetNetworkLayerForChecksum: %v", err)
+	}
+	eth := &layers.Ethernet{
+		SrcMAC:       net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55},
+		DstMAC:       net.HardwareAddr{0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee},
+		EthernetType: layers.EthernetTypeIPv6,
+	}
+
+	buf := gopacket.NewSerializeBuffer()
+	if err := gopacket.SerializeLayers(buf,
+		gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true},
+		eth, ip, tcp, gopacket.Payload(payload)); err != nil {
+		t.Fatalf("SerializeLayers: %v", err)
+	}
+	data := append([]byte(nil), buf.Bytes()...)
+
+	p := &datamodel.Packet{
+		Data:       data,
+		IPVersion:  6,
+		IPProto:    6,
+		SrcPort:    srcPort,
+		DstPort:    dstPort,
+		SrcIP:      srcIP.String(),
+		DstIP:      dstIP.String(),
+		PayloadLen: len(payload),
+		StreamID:   -1,
+	}
+	p.PayloadOff = len(data) - len(payload)
+	return p
+}
+
+// keyFromPacket 必须支持 IPv6（键与 gopacket 侧 16 字节裸地址构造的键一致），
+// 同时 IPv4 的键必须逐字节不变（回归红线）。
+// streamKey 的字段顺序即编码了归一化方向，故直接比较结构体即同时校验了方向。
+func TestKeyFromPacketIPv6(t *testing.T) {
+	const sp, dp = uint16(40000), uint16(80)
+
+	// ── IPv6：SrcIPNum/DstIPNum 故意留 0，逼迫走 IPv6 分支 ──
+	p6 := &datamodel.Packet{
+		IPVersion: 6,
+		IPProto:   6,
+		SrcIP:     "2001:db8::1",
+		DstIP:     "2001:db8::2",
+		SrcPort:   sp,
+		DstPort:   dp,
+		StreamID:  -1,
+	}
+	src16 := net.ParseIP(p6.SrcIP).To16()
+	dst16 := net.ParseIP(p6.DstIP).To16()
+	want6, wantDir6 := keyFrom(src16, dst16, sp, dp)
+
+	got6, ok := keyFromPacket(p6)
+	if !ok {
+		t.Fatalf("keyFromPacket(IPv6) = false, want true")
+	}
+	if got6 != want6 {
+		t.Fatalf("IPv6 key = %+v, want %+v", got6, want6)
+	}
+	// 归一化方向必须与 keyFrom 一致（首包 A→B）。
+	if u, _ := keyFrom(src16, dst16, sp, dp); u != want6 || wantDir6 != 0 {
+		t.Fatalf("keyFrom 归一化异常：key=%+v dir=%d", u, wantDir6)
+	}
+
+	// ── 反向断言：IPVersion=6 但 SrcIP 是 IPv4 字符串 => 必须 false，防 v4-mapped 串味 ──
+	bad := &datamodel.Packet{
+		IPVersion: 6,
+		IPProto:   6,
+		SrcIP:     "1.2.3.4",
+		DstIP:     "2001:db8::2",
+		SrcPort:   sp,
+		DstPort:   dp,
+		StreamID:  -1,
+	}
+	if k, ok := keyFromPacket(bad); ok {
+		t.Fatalf("IPv4 字符串 + IPVersion=6 必须 false，却得到 %+v", k)
+	}
+	bad2 := &datamodel.Packet{
+		IPVersion: 6,
+		IPProto:   6,
+		SrcIP:     "2001:db8::1",
+		DstIP:     "5.6.7.8",
+		SrcPort:   sp,
+		DstPort:   dp,
+		StreamID:  -1,
+	}
+	if k, ok := keyFromPacket(bad2); ok {
+		t.Fatalf("目的地址为 IPv4 字符串 + IPVersion=6 必须 false，却得到 %+v", k)
+	}
+
+	// ── IPv4 回归：现有 helper 造的包，键必须等于 4 字节裸地址构造的键 ──
+	p4 := buildTCPPacket(t, testSrc, testDst, sp, dp, 1, tcpFlags{ack: true, psh: true}, []byte("x"))
+	src4 := testSrc.To4()
+	dst4 := testDst.To4()
+	if len(src4) != 4 || len(dst4) != 4 {
+		t.Fatalf("IPv4 裸地址长度 = %d/%d, want 4/4", len(src4), len(dst4))
+	}
+	want4, _ := keyFrom(src4, dst4, sp, dp)
+	got4, ok := keyFromPacket(p4)
+	if !ok {
+		t.Fatalf("keyFromPacket(IPv4) = false, want true")
+	}
+	if got4 != want4 {
+		t.Fatalf("IPv4 key = %+v, want %+v（4 字节红线）", got4, want4)
+	}
+}
+
+// IPv6 包在被 analyzer 归流前（StreamID=-1）：
+//   - Feed 必须回写归一化 StreamDir（否则 detect 方向恒为 A→B）；
+//   - View 必须能通过五元组退化路径找回流并返回非空视图。
+func TestViewIPv6StreamDir(t *testing.T) {
+	r := New(DefaultOptions())
+	defer r.Close()
+
+	full := []byte("GET /v6 HTTP/1.1\r\nHost: victim\r\n\r\n")
+	cut := 7
+	p1 := buildTCPPacket6(t, testSrc6, testDst6, testSrcPort, testDstPort, 1001, tcpFlags{ack: true, psh: true}, full[:cut])
+	p2 := buildTCPPacket6(t, testSrc6, testDst6, testSrcPort, testDstPort, 1001+uint32(cut), tcpFlags{ack: true, psh: true}, full[cut:])
+
+	r.Feed(p1)
+	r.Feed(p2)
+
+	v := r.View(p2)
+	if v.BytesToServer() == nil && v.BytesToClient() == nil {
+		t.Fatalf("View(IPv6 p2) 两个方向都为空，期望非空视图")
+	}
+
+	// 用与生产同一套归一化算出期望方向，不写死假设。
+	_, wantDir := keyFrom(testSrc6.To16(), testDst6.To16(), testSrcPort, testDstPort)
+	if p2.StreamDir != wantDir {
+		t.Fatalf("p2.StreamDir = %d, want %d（应回写成归一化方向）", p2.StreamDir, wantDir)
+	}
+	if p2.StreamID >= 0 {
+		t.Fatalf("p2.StreamID = %d, want < 0（analyzer 未归流）", p2.StreamID)
+	}
+
+	// 数据必须落在与 StreamDir 对应的方向，且能拼出完整载荷。
+	if wantDir == 0 {
+		if got := v.BytesToServer(); !bytes.Equal(got, full) {
+			t.Fatalf("BytesToServer = %q, want %q", got, full)
+		}
+	} else {
+		if got := v.BytesToClient(); !bytes.Equal(got, full) {
+			t.Fatalf("BytesToClient = %q, want %q", got, full)
+		}
+	}
+}
