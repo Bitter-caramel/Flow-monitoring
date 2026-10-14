@@ -28,6 +28,8 @@ import (
 	"flow-monitoring/internal/modules/parse/analyzer"
 	"flow-monitoring/internal/modules/parse/decoder"
 	"flow-monitoring/internal/modules/parse/pcapng"
+	"flow-monitoring/internal/modules/reassembly"
+	"flow-monitoring/internal/modules/rule"
 )
 
 func main() {
@@ -58,6 +60,7 @@ func main() {
 	var eng *detect.Engine
 	var bus *eventbus.Bus
 	var cons *alert.Consumer
+	var reasm *reassembly.Reassembler
 	captureID := ""
 	if *detectPath != "" {
 		rs, err := detect.LoadFile(*detectPath)
@@ -68,6 +71,13 @@ func main() {
 		fmt.Print(rs.Report.String())
 		fmt.Println()
 		eng = rs.Engine()
+
+		// ★ 跳过优化：规则集里没有任何条件引用 stream 缓冲时，完全不建重组器
+		// （零开销）。用了 stream 才 New，并 defer Close。
+		if rs.UsesBuffer(rule.BufStream) {
+			reasm = reassembly.New(reassembly.DefaultOptions())
+			defer reasm.Close()
+		}
 
 		captureID = filepath.Base(path)
 		bus = eventbus.New()
@@ -143,7 +153,11 @@ func main() {
 			if a != nil {
 				flow = a.FeedFlow(p)
 			}
-			hits := eng.Match(&detect.Ctx{Pkt: p, Flow: flow})
+			// ★ 顺序红线：先把包喂给重组器，再做检测 —— 否则当包看不到自己那段流。
+			if reasm != nil {
+				reasm.Feed(p)
+			}
+			hits := eng.Match(&detect.Ctx{Pkt: p, Flow: flow, Stream: viewOf(reasm, p)})
 			for _, h := range hits {
 				alertTotal++
 				hitsByRule[h.RuleID]++
@@ -216,6 +230,18 @@ func main() {
 	if *analyze {
 		printAnalysis(a, *top)
 	}
+}
+
+// viewOf 返回这个包所在流的流视图；没有重组器时返回 nil（= 没有流数据）。
+//
+// ★ 宁可传 nil 也不要传一个空实现：Ctx.Stream 是接口，nil 与「空的流视图」
+// 在引擎里语义一致（都表示缓冲区不存在），但 nil 不引入任何分配，
+// 也不会让引擎误以为「有流数据只是恰好为空」。
+func viewOf(r *reassembly.Reassembler, p *datamodel.Packet) detect.StreamView {
+	if r == nil {
+		return nil
+	}
+	return r.View(p)
 }
 
 // printAnalysis 打印聚合分析结果：流聚合/协议/端点/端口四段。

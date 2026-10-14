@@ -110,6 +110,42 @@ func TestLoadTextEmpty(t *testing.T) {
 	}
 }
 
+// TestUsesBufferFile 验证从 e2e.rules 载入后 UsesBuffer 的判定：
+// 这些规则默认用 payload，没有任何条件引用 stream。
+func TestUsesBufferFile(t *testing.T) {
+	rs, err := LoadFile(filepath.Join("testdata", "e2e.rules"))
+	if err != nil {
+		t.Fatalf("LoadFile 失败: %v", err)
+	}
+	if !rs.UsesBuffer(rule.BufPayload) {
+		t.Error("UsesBuffer(rule.BufPayload) 应为 true")
+	}
+	if rs.UsesBuffer(rule.BufStream) {
+		t.Error("UsesBuffer(rule.BufStream) 应为 false")
+	}
+}
+
+// TestUsesBufferStreamInline 验证显式引用 stream 缓冲的内联规则能被识别。
+func TestUsesBufferStreamInline(t *testing.T) {
+	rs := LoadText(`alert tcp any any -> any any (msg:"x"; stream; content:"x"; sid:930001;)`)
+	for _, p := range rs.Programs {
+		for _, c := range p.Conds {
+			t.Logf("cond kind=%s buf=%q", c.Kind, c.Buf)
+		}
+	}
+	if !rs.UsesBuffer(rule.BufStream) {
+		t.Errorf("UsesBuffer(rule.BufStream) 应为 true；报告:\n%s", rs.Report.String())
+	}
+}
+
+// TestUsesBufferNil 验证 nil 接收者安全返回 false（上层在无规则集时不会 panic）。
+func TestUsesBufferNil(t *testing.T) {
+	var rs *RuleSet
+	if rs.UsesBuffer(rule.BufStream) {
+		t.Error("nil RuleSet 的 UsesBuffer 应返回 false")
+	}
+}
+
 // TestCompileRulesDroppedBuffer 直接验证 compileRules 的"不支持缓冲区剔除"与"其它编译错误"两条分支。
 func TestCompileRulesDroppedBuffer(t *testing.T) {
 	// 引用引擎不支持的缓冲区 -> 应被剔除进 dropped。

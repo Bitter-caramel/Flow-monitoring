@@ -124,3 +124,47 @@ type StreamView interface {
 | `flow:to_server` / `to_client` 真正的方向语义（现在只报"未生效"） | P1（需先定"服务端"判定） |
 | 多接口乱序合并、跨流关联 | P1/P2 |
 | 重组数据本身落盘（证据仍存**原始帧**） | 不做（刻意的） |
+
+## 12. 实测发现（11-4 接线跑通后）：`stream` 在 IPv6 上完全失效 + 告警去重塌陷
+
+### 12.1 现象（可复现）
+
+夹具 `testdata/test.pcapng`（18 包，**只有 1 个 IPv4 包**），规则
+`alert tcp any any -> any any (msg:"stream-all"; stream; pcre:"/./"; sid:940002;)`：
+
+```
+=== 检测结果：命中 1 次，涉及 1 条规则 ===     ← 只有那个 IPv4 包命中（No=16）
+[命中] No=16 ... 缓冲=stream
+```
+
+对照：同一条规则把 `stream;` 写到 `pcre` **之后** → 该 `stream` 被忽略、缓冲仍是 `payload`，命中 10 次。
+
+> ★ **粘性缓冲只作用于它之后的模式**：`stream; content:"x";` 才是对的写法（Suricata 同样如此）。
+> 写反了不会报错——缓冲区静默保持 `payload`，是最容易骗过测试的那种错。
+
+### 12.2 根因（两处，都在"流归属"上）
+
+1. `analyzer.FeedFlow` 只处理 `IPVersion == 4`（analyzer.go:68）⇒ **IPv6 包的 `StreamID` 恒为 -1**
+   （`analyzer_test.go:154` 还把这个行为锁成了断言），`Packet.StreamDir` 对 IPv6 也恒为 0。
+2. `reassembly.View` 的退化路径 `keyFromPacket` 只支持 IPv4（用 `SrcIPNum/DstIPNum` 拼 4 字节）
+   ⇒ IPv6 包在 `byID` 与 `byKey` 两条路上都找不到流 ⇒ 返回 `emptyStreamView{}`。
+
+注：gopacket 侧的 IPv6 是通的（`decodeTCP` 有 `has6` 分支与 `ip6P`；`keyFrom` 用 16 字节地址比较，
+IPv6 同样能进 `byKey`）——**断点只在"用 StreamID 找回流"这一步**，不是重组器不会处理 IPv6。
+
+### 12.3 连带缺陷（比 `stream` 更紧急）
+
+`Alert.StreamID` 取自 `pkt.StreamID`，而告警去重键 = `(RuleID, StreamID)`（alert/consumer.go:153）
+⇒ **IPv6 流量的同规则告警共用 `StreamID = -1`，会被压成一条**。实测 10 次命中只写出 2 条告警
+（"写入 2 条，去重压制 8 条"），其中一个"2"就是被塌陷掉的 IPv6 告警。这是**真实的漏报路径**。
+
+### 12.4 结论与排期
+
+- **不能先做 11-2**：在 IPv6 打通之前把 `alert tcp` 的默认粘性缓冲翻成 `stream`，会让 IPv6 上的
+  所有 TCP 内容规则**静默失效**（不报错、不告警、测试还可能因为夹具偏 IPv4 而全绿）。
+- 新增 **11-4b（P0）打通 IPv6 流归属**，两条路选一条或都做：
+  - (a) 小改：`keyFromPacket` 支持 IPv6（`net.ParseIP` 取 16 字节）+ `Feed` 对未被 analyzer 归流的包
+    回写 `StreamDir`（`keyFrom` 的归一化与 analyzer 完全一致：低地址为 A、地址相同比端口 ⇒ 无冲突）。
+  - (b) 根本解（推荐排期）：`analyzer` 支持 IPv6 归流（`Flow.A/B` 现在是 uint32，需扩展表示），
+    一次修好 stream + 流聚合统计 + 告警去重三处。
+- 新增 **11-4c（P0）告警去重键补上 `FlowKey`/五元组**，使 `StreamID == -1` 时不会跨流塌陷。

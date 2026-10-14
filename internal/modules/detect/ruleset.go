@@ -109,6 +109,25 @@ func (rs *RuleSet) Engine() *Engine {
 	return NewEngine(rs.Programs)
 }
 
+// UsesBuffer 报告规则集里是否有任何条件引用了指定缓冲区。
+// 用途：没有规则用 stream 时，上层可以完全跳过 TCP 重组（零开销）。
+func (rs *RuleSet) UsesBuffer(b rule.Buffer) bool {
+	if rs == nil {
+		return false
+	}
+	for _, p := range rs.Programs {
+		if p == nil {
+			continue
+		}
+		for _, c := range p.Conds {
+			if c.Buf == b {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // LoadText 解析一段规则文本并生成导入报告。
 //
 // 处理流程与“为什么这么处理”：
