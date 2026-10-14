@@ -13,6 +13,13 @@ import (
 	"flow-monitoring/internal/kernel/datamodel"
 )
 
+// flushInterval 是机会式超时 Flush 的最小间隔（用「包时间」衡量，不是真实时钟）。
+//
+// 为什么需要它：Feed 是逐包热路径，每个包都对所有连接扫一遍做超时判定代价太高；
+// 用「上次 Flush 的包时间 + 固定间隔」限频，既保证超时最终能被执行，又不拖慢热路径。
+// 为什么不放进 Options：这是实现细节（扫描频率），不是用户可配置的资源红线。
+const flushInterval = time.Second
+
 // Reassembler 是 TCP 重组器：包装 gopacket 的 StreamPool + Assembler，
 // 我们的 Stream 负责「数据存哪儿、存多少」。
 //
@@ -29,6 +36,11 @@ type Reassembler struct {
 	totalBytes int64 // 所有方向缓冲的字节总量
 	evictions  int64 // 因 MemCap 淘汰的流数（计数，供观测）
 	closed     bool
+
+	// lastFlush 是上一次机会式 Flush 时的「包时间」（★ 不是 time.Now()）。
+	// 用它限频：两次 Flush 之间至少相隔 flushInterval，避免逐包全量扫描。
+	// 零值表示「还没 Flush 过」。
+	lastFlush time.Time
 
 	// 复用解码层与 parser，避免逐包分配。
 	// Feed 串行调用，与 gopacket Assembler 的并发约束一致，无需加锁。
@@ -120,7 +132,17 @@ func (r *Reassembler) Feed(p *datamodel.Packet) {
 	if !ok {
 		return
 	}
-	r.asm.AssembleWithContext(netFlow, tcp, asmContext{})
+	// ★ 必须把包的真实 CaptureInfo（尤其是 Timestamp=包时间 p.Time）传给 Assembler：
+	// gopacket 用 ci.Timestamp 记录 half.lastSeen 与乱序页的 page.seen，
+	// 超时 Flush 判定（FlushOptions.T）正是拿它来比较的。缺失则恒为零值，
+	// Flush 会「看起来做了但根本没生效」。
+	r.asm.AssembleWithContext(netFlow, tcp, asmContext{ci: gopacket.CaptureInfo{
+		Timestamp:     p.Time,
+		CaptureLength: len(p.Data),
+		Length:        len(p.Data),
+	}})
+	// 机会式超时 Flush：喂完本包后，按包时间回收超出 FlowTimeout 仍没补齐的洞。
+	r.flushExpired(p.Time)
 
 	key, nd := keyFrom(netFlow.Src().Raw(), netFlow.Dst().Raw(), uint16(tcp.SrcPort), uint16(tcp.DstPort))
 
@@ -145,6 +167,35 @@ func (r *Reassembler) Feed(p *datamodel.Packet) {
 		s.streamID = p.StreamID
 		r.byID[p.StreamID] = s
 	}
+}
+
+// flushExpired 做「机会式超时 Flush」：把超过 FlowTimeout 仍未补齐的洞跳过交付，
+// 让 ReassembledSG 收到 skip>0（Gaps/GapBytes 如实记账），并让洞之后的数据重新可见。
+//
+// ★ 为什么是「机会式」而不是后台定时器：本包与 gopacket Assembler 一样不做并发保护，
+// 调用方串行 Feed；起后台 goroutine 会引入数据竞争，违反设计红线。
+//
+// ★ 时间基准必须是包时间 now=p.Time（不是 time.Now()）：离线回放时成千上万个包可能在
+// 亚秒内跑完，若用真实时钟永远等不到超时，测试也会非确定。
+//
+// 限频：距上次 Flush 不足 flushInterval（包时间）就直接返回，避免逐包全量扫描。
+//
+// 语义（已用 gopacket 源码核实）：cutoff := now - FlowTimeout；gopacket 只把
+// 「最早未补齐段的 seen 时间 < cutoff」的段跳过并交付；TC 留零 ⇒ 不关闭任何连接，
+// 因此不会丢掉已累积的字节。
+func (r *Reassembler) flushExpired(now time.Time) {
+	if now.IsZero() {
+		// SPB 等无时间戳包：没有可信的「现在」，无法做超时判定，跳过。
+		return
+	}
+	if !r.lastFlush.IsZero() && now.Sub(r.lastFlush) < flushInterval {
+		return
+	}
+	r.lastFlush = now
+	// 只 Flush 不 Close：FlushOptions.TC 零值 ⇒ gopacket 的关闭条件是
+	// conn.lastSeen().Before(TC)，恒为 false，所以没有任何连接会被关掉；
+	// 用 T 把「seen < cutoff」的过期洞跳过交付。
+	r.asm.FlushWithOptions(reassembly.FlushOptions{T: now.Add(-r.opts.FlowTimeout)})
 }
 
 // View 返回「这个包所在流」的流视图，形状与 detect.StreamView 一致。

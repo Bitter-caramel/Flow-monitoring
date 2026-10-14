@@ -118,6 +118,40 @@ type StreamView interface {
 同时复核 `ReassemblyComplete` 恒返回 `true` 与"中途流起始序号"策略是否符合预期。
 刚建好的洞夹具可直接用作**红转绿守卫**。
 
+### 7.2 11-6b 已落地：机会式超时 Flush（★ §7 那条 P1 已修）
+
+改动只在 `internal/modules/reassembly`：
+
+1. ★ **把真实 `CaptureInfo`（含 `Timestamp = p.Time`）传给 Assembler** —— 以前传的是 `asmContext{}`
+   零值，gopacket 看到的包时间戳**恒为 `0001-01-01`**；不修这个，任何超时判定都会
+   "看起来做了但根本没生效"（这是本次实测抓出来的隐性问题）。
+2. **`flushExpired(now = p.Time)`**：超过 `FlowTimeout` 仍未补齐的洞被**跳过交付**
+   （`FlushWithOptions(FlushOptions{T: now-FlowTimeout})`；`TC` 留零 ⇒ **不关闭连接、不丢已累积字节**）。
+   - ★ **时间基准必须是包时间**，不是 `time.Now()`：离线回放时成千上万个包可能在亚秒内跑完，
+     用真实时钟永远等不到超时，测试也会非确定。
+   - ★ **机会式**（在 `Feed` 里触发 + 按包时间限频 `flushInterval = 1s`），**不起后台 goroutine**
+     —— 本包不做并发保护，后台定时器会引入数据竞争。
+   - 无时间戳的包（SPB 等）直接跳过 ⇒ 与以前行为一致。
+
+实测（`TestGapFlushSkipsAndContinues`，红转绿守卫）：
+
+| | Bytes | Gaps | GapBytes | View |
+|---|---|---|---|---|
+| flush 前（超时未到） | 10 | 0 | 0 | `AAAAAAAAAA` |
+| flush 后（超时到点） | 20 | **1** | **10** | `AAAAAAAAAACCCCCCCCCC` |
+
+⇒ ① 洞被**如实记账**（补上 §7 的 P1）；② 洞之后的数据**不再被无限期挡住**；
+③ **没有凭空造出洞里的字节**（View 恰为 `[0,10) + [20,30)`）。
+★ **变异检验**（在仓库外副本里把 `flushExpired` 变成 no-op）：该守卫立刻变红
+（`flush 后 Gaps=0，want >=1`）✓ 证明它是真守卫，不是装饰。
+
+★ **不变量**：默认 `FlowTimeout = 60s`、真实样本时间跨度约 3 秒 ⇒ **不触发 flush**；
+端到端 A/B/C 三组输出与改动前**逐字节一致** ✓（说明这次修复对常规流量**行为中立**）。
+
+★ **仍待修（11-6c）**：`Accept` 强制 `start = true` 导致**中途抓包（无 SYN / 首段不是最小序号）时
+更小序号的段被直接丢弃**（探针实测 `[C,A,B]` 只剩 `CCCC`）；以及 `ReassemblyComplete` 恒返回 `true`
+的策略复核。
+
 ## 8. 顺带解锁：整条连接级证据（10-4 的 P1）
 
 有了按流字节流后，证据可从"时间窗"升级为"**整条连接**"：命中的流 → 导出该流的**全部包**
