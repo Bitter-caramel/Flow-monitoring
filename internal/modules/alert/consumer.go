@@ -24,9 +24,13 @@ type ConsumerOptions struct {
 }
 
 // dedupKey 是去重键：规则 + 流。
+//
+// flowKey 只在 streamID 缺失（<0，当前=IPv6）时参与键，
+// 否则会改变 IPv4 既有行为。
 type dedupKey struct {
 	ruleID   string
 	streamID int
+	flowKey  string
 }
 
 // Consumer 从一个事件 channel 消费告警，去重后写入 Sink。
@@ -151,6 +155,14 @@ func (c *Consumer) consume(ev eventbus.Event) {
 		return
 	}
 	key := dedupKey{ruleID: a.Alert.RuleID, streamID: a.Alert.StreamID}
+	// ★ IPv6 的 StreamID 恒为 -1（analyzer 尚未归并 IPv6）：若仍只用 (ruleID, -1) 做键，
+	// 同一条规则在 IPv6 上的所有告警会在窗口内被压成一条（实测 13 次命中只写 2 条）。
+	// 用方向化五元组 FlowKey 兜底，即可让"不同流"各自留一条告警。
+	// ★ 只在 StreamID < 0 时用：IPv4（StreamID >= 0）的键保持完全不变，零回归风险。
+	// FlowKey 为空时退化为旧行为（不 panic、不放宽去重）。
+	if a.Alert.StreamID < 0 {
+		key.flowKey = a.Alert.FlowKey
+	}
 
 	now := c.now()
 	c.mu.Lock()

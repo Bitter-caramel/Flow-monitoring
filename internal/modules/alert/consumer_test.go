@@ -256,3 +256,103 @@ func TestConsumerCloseDrainsBufferedSmallBuffer(t *testing.T) {
 		t.Fatalf("sink 期望 20 条, 实际 %d 条（小缓冲事件被丢弃）", len(got))
 	}
 }
+
+// evFlow 基于 evFor 造一条告警，但覆盖 FlowKey（方向化五元组），
+// 用于验证 StreamID 缺失（<0，当前=IPv6）时 FlowKey 兜底参与去重键。
+func evFlow(ruleID string, streamID int, flowKey string) Event {
+	ev := evFor(ruleID, streamID, "flow")
+	ev.Alert.FlowKey = flowKey
+	return ev
+}
+
+// TestConsumerIPv6DifferentFlowNotDeduped 守住：StreamID 缺失（-1，当前=IPv6）
+// 时，同一条规则下不同流（FlowKey 不同）的告警不再互相压制。
+// ★ 改前此用例为红：两条都被压成 (ruleID,-1) 的同键，只写 1 条。
+func TestConsumerIPv6DifferentFlowNotDeduped(t *testing.T) {
+	fixed := func() time.Time { return time.Unix(1700000000, 0) }
+	ch := make(chan eventbus.Event, 16)
+	sink := &fakeSink{}
+	c := NewConsumer(ch, sink, ConsumerOptions{DedupWindow: time.Hour, Now: fixed})
+	defer c.Close()
+
+	ch <- eventbus.Event{Payload: evFlow("r1", -1, "2408:1::1:443->2408:1::2:39912/tcp")}
+	ch <- eventbus.Event{Payload: evFlow("r1", -1, "2408:3::1:443->2408:3::2:50000/tcp")}
+	waitFor(t, "Written==2", func() bool { return c.Written() == 2 })
+
+	if c.Written() != 2 {
+		t.Fatalf("不同 IPv6 流应各写一条, 实际 Written=%d", c.Written())
+	}
+	if c.Suppressed() != 0 {
+		t.Fatalf("不同 IPv6 流不应互相压制, 实际 Suppressed=%d", c.Suppressed())
+	}
+	if got := sink.snapshot(); len(got) != 2 {
+		t.Fatalf("sink 期望 2 条, 实际 %d 条", len(got))
+	}
+}
+
+// TestConsumerIPv6SameFlowDeduped 守住：StreamID 缺失（-1）时，同一流
+// （FlowKey 相同）窗口内的重复告警仍被压制。
+func TestConsumerIPv6SameFlowDeduped(t *testing.T) {
+	fixed := func() time.Time { return time.Unix(1700000000, 0) }
+	ch := make(chan eventbus.Event, 16)
+	sink := &fakeSink{}
+	c := NewConsumer(ch, sink, ConsumerOptions{DedupWindow: time.Hour, Now: fixed})
+	defer c.Close()
+
+	flow := "2408:1::1:443->2408:1::2:39912/tcp"
+	ch <- eventbus.Event{Payload: evFlow("r1", -1, flow)}
+	ch <- eventbus.Event{Payload: evFlow("r1", -1, flow)}
+	waitFor(t, "Suppressed==1", func() bool { return c.Suppressed() == 1 })
+
+	if c.Written() != 1 {
+		t.Fatalf("同一 IPv6 流窗口内应只写 1 条, 实际 Written=%d", c.Written())
+	}
+	if c.Suppressed() != 1 {
+		t.Fatalf("期望压制 1 条, 实际 %d", c.Suppressed())
+	}
+	if got := sink.snapshot(); len(got) != 1 {
+		t.Fatalf("sink 期望 1 条, 实际 %d 条", len(got))
+	}
+}
+
+// TestConsumerIPv4IgnoresFlowKey 守住：StreamID>=0（IPv4 既有行为）时 FlowKey
+// 不参与去重键 —— 即使 FlowKey 故意不同，同一 (ruleID, streamID) 仍只写 1 条。
+func TestConsumerIPv4IgnoresFlowKey(t *testing.T) {
+	fixed := func() time.Time { return time.Unix(1700000000, 0) }
+	ch := make(chan eventbus.Event, 16)
+	sink := &fakeSink{}
+	c := NewConsumer(ch, sink, ConsumerOptions{DedupWindow: time.Hour, Now: fixed})
+	defer c.Close()
+
+	ch <- eventbus.Event{Payload: evFlow("r1", 7, "10.0.0.1:1->10.0.0.2:2/tcp")}
+	ch <- eventbus.Event{Payload: evFlow("r1", 7, "10.0.0.9:9->10.0.0.8:8/udp")}
+	waitFor(t, "Suppressed==1", func() bool { return c.Suppressed() == 1 })
+
+	if c.Written() != 1 {
+		t.Fatalf("IPv4(StreamID>=0) 去重不应受 FlowKey 影响, 期望写 1 条, 实际 %d", c.Written())
+	}
+	if c.Suppressed() != 1 {
+		t.Fatalf("期望压制 1 条, 实际 %d", c.Suppressed())
+	}
+}
+
+// TestConsumerIPv6EmptyFlowKeyFallsBack 守住：StreamID<0 且 FlowKey 为空时
+// 退化为旧行为（同键压制），不 panic、不放宽去重。
+func TestConsumerIPv6EmptyFlowKeyFallsBack(t *testing.T) {
+	fixed := func() time.Time { return time.Unix(1700000000, 0) }
+	ch := make(chan eventbus.Event, 16)
+	sink := &fakeSink{}
+	c := NewConsumer(ch, sink, ConsumerOptions{DedupWindow: time.Hour, Now: fixed})
+	defer c.Close()
+
+	ch <- eventbus.Event{Payload: evFlow("r1", -1, "")}
+	ch <- eventbus.Event{Payload: evFlow("r1", -1, "")}
+	waitFor(t, "Suppressed==1", func() bool { return c.Suppressed() == 1 })
+
+	if c.Written() != 1 {
+		t.Fatalf("FlowKey 为空应退化为旧行为只写 1 条, 实际 %d", c.Written())
+	}
+	if c.Suppressed() != 1 {
+		t.Fatalf("期望压制 1 条, 实际 %d", c.Suppressed())
+	}
+}
