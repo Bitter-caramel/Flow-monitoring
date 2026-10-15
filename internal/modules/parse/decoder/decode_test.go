@@ -257,3 +257,73 @@ func TestDecode_TestPcapng(t *testing.T) {
 	}
 	t.Logf("decoded %d/%d packets with protocol", decoded, len(cap.Packets))
 }
+
+// buildPaddedTCPFrame 造一个 Ethernet+IPv4+TCP+4 字节载荷 的帧，并补到以太网最小
+// 60 字节（尾部 2 字节填充，真实网卡同样会补），用于验证载荷偏移不会被填充带偏。
+func buildPaddedTCPFrame(t *testing.T) []byte {
+	t.Helper()
+	frame := ethFrame(0x0800, ipv4Packet(6,
+		net.ParseIP("192.168.1.100"),
+		net.ParseIP("192.168.1.1"),
+		tcpSegment(12345, 80, 0x18, 1000, 1, []byte("AAAA")),
+	))
+	frame = append(frame, 0x00, 0x00) // 58 -> 60 字节
+	return frame
+}
+
+// TestPayloadOffWithEthernetPadding 守住：帧尾有以太网填充时，载荷偏移不得偏大。
+//
+// 以太网最小帧 60 字节，4 字节载荷的帧只有 58 字节 ⇒ 序列化时会补 2 字节 →
+// 旧算法 len(Data)-len(payload) 会算出 56（真值 54）⇒ 取到 Data[56:60]。
+func TestPayloadOffWithEthernetPadding(t *testing.T) {
+	frame := buildPaddedTCPFrame(t)
+	if len(frame) != 60 {
+		t.Fatalf("前置条件：帧应为 60 字节（含 2 字节填充），实际 %d", len(frame))
+	}
+
+	p := newPacket(frame)
+	Decode(p, 1)
+
+	if p.PayloadOff != 54 {
+		t.Fatalf("PayloadOff = %d, want 54（★ 不能是 56：那是旧算法把尾部填充算进载荷）", p.PayloadOff)
+	}
+	if p.PayloadLen != 4 {
+		t.Fatalf("PayloadLen = %d, want 4", p.PayloadLen)
+	}
+	if got := p.Data[p.PayloadOff : p.PayloadOff+p.PayloadLen]; string(got) != "AAAA" {
+		t.Fatalf("Data[off:off+len] = %q, want %q", got, "AAAA")
+	}
+}
+
+// TestPayloadOffWithUDP 同款：Ethernet+IPv4+UDP+"AAAA" ⇒ 偏移 42、长度 4。
+func TestPayloadOffWithUDP(t *testing.T) {
+	frame := ethFrame(0x0800, ipv4Packet(17,
+		net.ParseIP("10.0.0.1"),
+		net.ParseIP("10.0.0.2"),
+		udpSegment(1000, 2000, []byte("AAAA")),
+	))
+
+	p := newPacket(frame)
+	Decode(p, 1)
+
+	if p.PayloadOff != 42 {
+		t.Fatalf("PayloadOff = %d, want 42", p.PayloadOff)
+	}
+	if p.PayloadLen != 4 {
+		t.Fatalf("PayloadLen = %d, want 4", p.PayloadLen)
+	}
+}
+
+// TestPayloadOffTruncatedFrameNoPanic 截断帧（snaplen）走同一路径不得 panic，
+// 且偏移必须落在 [0, len(Data)] 内。
+func TestPayloadOffTruncatedFrameNoPanic(t *testing.T) {
+	frame := buildPaddedTCPFrame(t)
+
+	trunc := append([]byte(nil), frame[:40]...) // 截到只剩 40 字节
+	p := newPacket(trunc)
+	Decode(p, 1) // 不应 panic
+
+	if p.PayloadOff < 0 || p.PayloadOff > len(p.Data) {
+		t.Fatalf("PayloadOff = %d 越界，len(Data) = %d", p.PayloadOff, len(p.Data))
+	}
+}

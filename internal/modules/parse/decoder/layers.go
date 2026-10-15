@@ -59,6 +59,7 @@ func (d *decoders) decode(p *datamodel.Packet, linkType int, path *[]string) {
 	if err := parser.DecodeLayers(data, &d.decoded); err != nil && len(d.decoded) == 0 {
 		p.Malformed = true
 	}
+	d.hdrOff = 0 // ★ 每个包都要清零：hdrOff 累计「已消费的头部长度」
 	for _, lt := range d.decoded {
 		d.apply(p, lt, path)
 	}
@@ -69,9 +70,15 @@ func (d *decoders) decode(p *datamodel.Packet, linkType int, path *[]string) {
 // 只处理 decoded 里真实出现的层：DecodingLayerParser 复用层对象，
 // 未出现的层会残留上一包的值，因此绝不能按固定顺序无条件读取。
 func (d *decoders) apply(p *datamodel.Packet, lt gopacket.LayerType, path *[]string) {
+	// ★ off = 本层头部的起点；hdr = 本层头部长度。
+	// 载荷起点 = 本层起点 + 本层头部长度，因此**不能**再用 len(Data)-len(payload)
+	// 反算（帧尾有以太网填充时会偏）。
+	off := d.hdrOff
+	var hdr int
 	switch lt {
 	case layers.LayerTypeEthernet:
 		*path = append(*path, "eth")
+		hdr = len(d.eth.Contents)
 		p.SrcMAC = d.eth.SrcMAC.String()
 		p.DstMAC = d.eth.DstMAC.String()
 		p.EtherType = uint16(d.eth.EthernetType)
@@ -80,46 +87,44 @@ func (d *decoders) apply(p *datamodel.Packet, lt gopacket.LayerType, path *[]str
 		}
 	case layers.LayerTypeDot1Q:
 		*path = append(*path, "vlan")
+		hdr = len(d.dot1q.Contents)
 		p.EtherType = uint16(d.dot1q.Type)
 	case layers.LayerTypeARP:
 		*path = append(*path, "arp")
+		hdr = len(d.arp.Contents)
 		applyARP(p, &d.arp)
 	case layers.LayerTypeIPv4:
 		*path = append(*path, "ip4")
+		hdr = len(d.ip4.Contents)
 		applyIPv4(p, &d.ip4)
 	case layers.LayerTypeIPv6:
 		*path = append(*path, "ip6")
+		hdr = len(d.ip6.Contents)
 		applyIPv6(p, &d.ip6)
 	case layers.LayerTypeTCP:
 		*path = append(*path, "tcp")
-		applyTCP(p, &d.tcp)
+		hdr = len(d.tcp.Contents)
+		applyTCP(p, &d.tcp, off+hdr) // ★ 传入载荷起点
 		if p.PayloadLen > 0 {
 			l7.Dispatch(p) // TCP：内容嗅探优先
 		}
 	case layers.LayerTypeUDP:
 		*path = append(*path, "udp")
-		applyUDP(p, &d.udp)
+		hdr = len(d.udp.Contents)
+		applyUDP(p, &d.udp, off+hdr) // ★ 传入载荷起点
 		if p.PayloadLen > 0 {
 			l7.Dispatch(p) // UDP：端口优先
 		}
 	case layers.LayerTypeICMPv4:
 		*path = append(*path, "icmp")
+		hdr = len(d.icmp4.Contents)
 		applyICMPv4(p, &d.icmp4)
 	case layers.LayerTypeICMPv6:
 		*path = append(*path, "icmpv6")
+		hdr = len(d.icmp6.Contents)
 		applyICMPv6(p, &d.icmp6)
 	}
-}
-
-// payloadOffset 计算载荷在 p.Data 中的绝对偏移。
-//
-// gopacket 的 Payload 是原始数据的后缀切片，故偏移 = 总长 - 载荷长。
-func payloadOffset(p *datamodel.Packet, payload []byte) int {
-	off := len(p.Data) - len(payload)
-	if off < 0 {
-		return 0
-	}
-	return off
+	d.hdrOff = off + hdr // ★ 给下一层累加
 }
 
 // applyIPv4 映射 IPv4 层。

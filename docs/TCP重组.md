@@ -237,6 +237,34 @@ func payloadOffset(p *datamodel.Packet, payload []byte) int {
   而应按 **L2+L3+L4 头部长度**（或直接利用 `Packet.Data` 与 gopacket 给出的层偏移）计算；
   并补"带尾部填充的帧"夹具（这类缺陷正是"夹具不覆盖就永远看不见"的典型）。
 
+#### 7.4.1 ★ 11-8 已修：`payloadOffset` 改为「按头部长度累加」
+
+- `internal/modules/parse/decoder/layers.go`：**删掉** `payloadOffset`；在 `apply` 里用
+  `off := d.hdrOff` + `hdr = len(该层.Contents)` 逐层累加，TCP/UDP 取 `off+hdr` 作为载荷起点
+  （`d.hdrOff` 在每包解码前清零）。⇒ **与帧尾有没有填充彻底无关**，且 IPv4/IPv6/VLAN/TCP 选项自动正确。
+- `internal/modules/parse/decoder/l4mapping.go`：`applyTCP/applyUDP` 增加 `payloadOff int` 参数，
+  并用 `clampPayloadOff(off, len(p.Data))` 兜住越界（截断帧/畸形帧归 0，不 panic）。
+- 新测试（`decode_test.go`）：带尾部填充的 TCP 帧 ⇒ `PayloadOff == 54`（不是 56）、
+  载荷取出来就是 `"AAAA"`；UDP 同款（42）；**截断帧不越界不 panic**。
+- ★ **端到端守卫复原**：`hotpath/reorder_test.go` 的 `TestMidstreamReorderStillMatchedByPayload`
+  **把 11-6c-fix 的临时 workaround（6 字节载荷）改回 4 字节**（帧重新带上填充）⇒
+  现在这条同时守住 C′ 与"填充不影响偏移"两件事 ✓。
+
+**变异检验（仓库外副本把算法退回 `len(Data)-len(payload)`）**：
+
+```
+--- FAIL: TestPayloadOffWithEthernetPadding
+    PayloadOff = 56, want 54（★ 不能是 56：那是旧算法把尾部填充算进载荷）
+--- FAIL: TestMidstreamReorderStillMatchedByPayload
+    应恰好命中 1 次（A 包回落 payload），实际 0 行: []
+```
+
+⇒ 两条守卫都是**真守卫**，且复现的正是最初诊断到的现象。
+
+**不变量（修复未波及既有行为）**：全仓 `go test ./...` 全绿（含 11-5 的三组引擎级 golden）；
+端到端 A/B/C 三组输出与基线**逐字节一致**（真实样本那个 55 字节小帧本来就没被填充 ⇒
+新旧算法在那里都对，这正是"不变量成立"的原因）。
+
 ## 8. 顺带解锁：整条连接级证据（10-4 的 P1）
 
 有了按流字节流后，证据可从"时间窗"升级为"**整条连接**"：命中的流 → 导出该流的**全部包**

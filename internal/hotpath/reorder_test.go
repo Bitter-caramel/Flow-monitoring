@@ -248,25 +248,22 @@ alert tcp any any -> any any (msg:"full"; stream; pcre:"/AAAABBBBCCCC/"; sid:970
 //
 // 夹具 [C, A, B]（★ 故意不写 SYN，否则不是中途流，C′ 不触发）：
 //
-//	C=[1013,1019)="CCCCCC" 先到 ⇒ 把重组基准钉在 1013；
-//	A=[1001,1007)="AAAAAA"、B=[1007,1013)="BBBBBB" 都落在基准之前 ⇒ 段永久搁浅，
-//	重组视图里只剩 C 的 "CCCCCC"。
+//	C=[1009,1013)="CCCC" 先到 ⇒ 把重组基准钉在 1009；
+//	A=[1001,1005)="AAAA"、B=[1005,1009)="BBBB" 都落在基准之前 ⇒ 段永久搁浅，
+//	重组视图里只剩 C 的 "CCCC"。
 //
-// 规则 `stream; pcre:"/AAAAAA/"`：
-//   - ★ 接通检测侧之前这条测试是红的：A 包的 stream 视图只有 "CCCCCC"，匹配不到 "AAAAAA"；
-//   - 接通后：C′ 让承载搁浅段的 A 包回落 payload（"AAAAAA"）⇒ 命中；C 包用 stream（只有
-//     "CCCCCC"）不命中；B 包回落 payload（"BBBBBB"）也不命中 ⇒ 恰好 1 次，命中 A 包。
-//
-// ★ 为什么载荷用 6 字节而不是 4 字节：以太网帧最小 60 字节，4 字节载荷只有 58 字节 ⇒
-// 序列化时尾部会补 2 字节零（真实网卡同样会补）⇒ 会踩到 decoder 的 payloadOffset 缺陷
-// （`decoder/layers.go` 用 `len(Data)-len(payload)` 从帧尾反算 ⇒ 有填充时偏移偏大，见 12.x）。
-// 6 字节载荷让帧恰好 60 字节、不带填充，从而**只验证 C′ 本身**（该 decoder 缺陷另开任务修）。
+// 规则 `stream; pcre:"/AAAA/"`：
+//   - ★ 接通检测侧之前这条测试是红的：A 包的 stream 视图只有 "CCCC"，匹配不到 "AAAA"；
+//   - 接通后：C′ 让承载搁浅段的 A 包回落 payload（"AAAA"）⇒ 命中；C 包用 stream（只有
+//     "CCCC"）不命中；B 包回落 payload（"BBBB"）也不命中 ⇒ 恰好 1 次，命中 A 包。
+//   - ★ 载荷特意用 4 字节（帧 58 字节 + 2 字节以太网填充）：这条同时覆盖了 11-8 修的
+//     "帧尾有填充时 payload 偏移不能偏"（见 decoder 的 TestPayloadOffWithEthernetPadding）。
 func TestMidstreamReorderStillMatchedByPayload(t *testing.T) {
-	const rules = `alert tcp any any -> any any (msg:"x"; stream; pcre:"/AAAAAA/"; sid:970021;)`
+	const rules = `alert tcp any any -> any any (msg:"x"; stream; pcre:"/AAAA/"; sid:970021;)`
 
-	c := tcpFrame(t, 1013, false, "CCCCCC") // [1013,1019)：先到，钉住基准
-	a := tcpFrame(t, 1001, false, "AAAAAA") // [1001,1007)：落在基准之前
-	b := tcpFrame(t, 1007, false, "BBBBBB") // [1007,1013)：落在基准之前
+	c := tcpFrame(t, 1009, false, "CCCC") // [1009,1013)：先到，钉住基准
+	a := tcpFrame(t, 1001, false, "AAAA") // [1001,1005)：落在基准之前
+	b := tcpFrame(t, 1005, false, "BBBB") // [1005,1009)：落在基准之前
 
 	dir := t.TempDir()
 	path := writeFixture(t, dir, "midstream-reorder", [][]byte{c, a, b})

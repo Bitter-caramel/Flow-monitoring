@@ -11,12 +11,13 @@ import (
 )
 
 // applyTCP 映射 TCP 层。
-func applyTCP(p *datamodel.Packet, t *layers.TCP) {
+func applyTCP(p *datamodel.Packet, t *layers.TCP, payloadOff int) {
 	p.SrcPort = uint16(t.SrcPort)
 	p.DstPort = uint16(t.DstPort)
 	p.IPProto = 6
 	p.TCPFlags = tcpFlags(t)
-	p.PayloadOff = payloadOffset(p, t.Payload)
+	// ★ 载荷起点由调用方按「头部长度累加」算好（帧尾填充不影响它）。
+	p.PayloadOff = clampPayloadOff(payloadOff, len(p.Data))
 	p.PayloadLen = len(t.Payload)
 	p.Proto = "TCP"
 
@@ -32,14 +33,25 @@ func applyTCP(p *datamodel.Packet, t *layers.TCP) {
 }
 
 // applyUDP 映射 UDP 层。
-func applyUDP(p *datamodel.Packet, u *layers.UDP) {
+func applyUDP(p *datamodel.Packet, u *layers.UDP, payloadOff int) {
 	p.SrcPort = uint16(u.SrcPort)
 	p.DstPort = uint16(u.DstPort)
 	p.IPProto = 17
-	p.PayloadOff = payloadOffset(p, u.Payload)
+	p.PayloadOff = clampPayloadOff(payloadOff, len(p.Data))
 	p.PayloadLen = len(u.Payload)
 	p.Proto = "UDP"
 	p.Info = fmt.Sprintf("%d → %d Len=%d", p.SrcPort, p.DstPort, p.PayloadLen)
+}
+
+// clampPayloadOff 兜住越界：偏移必须落在 [0, n] 内，否则归 0。
+//
+// ★ 截断帧（snaplen）或畸形帧可能让「头部长度累加」的结果超过 len(Data)，
+// 这里只保证不越界；载荷本身是否完整由 PayloadLen 与提取器的越界检查负责。
+func clampPayloadOff(off, n int) int {
+	if off < 0 || off > n {
+		return 0
+	}
+	return off
 }
 
 // applyICMPv4 映射 ICMPv4 层。

@@ -40,6 +40,9 @@ type decoders struct {
 	arp     layers.ARP
 	payload gopacket.Payload
 
+	// hdrOff 是「本包已消费的头部长度」累计值，供 apply 计算 L4 载荷起点。
+	hdrOff int
+
 	ethParser *gopacket.DecodingLayerParser // 起始层 Ethernet
 	ip4Parser *gopacket.DecodingLayerParser // 起始层 IPv4（裸 IP / NULL loopback）
 	ip6Parser *gopacket.DecodingLayerParser // 起始层 IPv6
