@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -112,5 +113,154 @@ func TestPostgres_Integration(t *testing.T) {
 	// 清理包
 	if err := pg.Packets().DeleteByCapture(ctx, rec.ID); err != nil {
 		t.Errorf("DeleteByCapture: %v", err)
+	}
+}
+
+// TestPostgres_ListByEndpoints_Integration 是 11-7b「按四元组双向查包」的**真库**测试。
+//
+// ★ 为什么必须有这一条：11-7b 落地时只用手写内存替身验证过语义，**这段 SQL 一次都没在真库跑过**。
+// 内存替身能覆盖"双向/对称/排序/分页"的语义，但覆盖不了真库特有的行为 ——
+// 参数类型（src_port 是 INTEGER 而 Endpoint.Port 是 uint16）、NULL 时间在 ORDER BY 里的位置、
+// REFERENCES 外键、以及"跨 capture 查询"到底能不能查到别的 capture 的包。
+//
+// 通过 FLOW_TEST_PG_DSN 提供连接串时运行，否则跳过（与 TestPostgres_Integration 同一约定）。
+func TestPostgres_ListByEndpoints_Integration(t *testing.T) {
+	dsn := testDSN()
+	if dsn == "" {
+		t.Skip("FLOW_TEST_PG_DSN 未设置，跳过 PostgreSQL 集成测试")
+	}
+
+	ctx := context.Background()
+	pg, err := New(ctx, dsn, 5)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer pg.Close()
+	if err := pg.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	// ★ 走"能力探测"这条真实调用路径：PacketStore 里没有该方法，要断言成可选扩展。
+	q, ok := pg.Packets().(storage.PacketFlowQuerier)
+	if !ok {
+		t.Fatal("PostgreSQL 实现未提供 storage.PacketFlowQuerier（可选扩展）")
+	}
+
+	// 每次运行用唯一 id，避免与上次残留数据相互干扰。
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	capA, capB := "it-a-"+suffix, "it-b-"+suffix
+	base := time.Date(2024, 7, 1, 12, 0, 0, 0, time.UTC)
+	for _, id := range []string{capA, capB} {
+		if err := pg.Captures().Create(ctx, &storage.CaptureRecord{
+			ID: id, Name: "listbyendpoints", Format: "pcapng", LinkType: 1, ImportedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("Create capture %s: %v", id, err)
+		}
+		defer pg.Captures().Delete(ctx, id) // packets 有 ON DELETE CASCADE
+	}
+
+	epA := storage.Endpoint{IP: "10.1.1.1", Port: 1111}
+	epB := storage.Endpoint{IP: "10.1.1.2", Port: 80}
+
+	// cap-a：A->B（t+2s）、B->A（t+1s）；cap-b：A->B（t+3s）；再加干扰包与"零时间"包。
+	if err := pg.Packets().SaveBatch(ctx, capA, []storage.PacketRecord{
+		{CaptureID: capA, No: 5, Time: base.Add(2 * time.Second), SrcIP: epA.IP, SrcPort: epA.Port, DstIP: epB.IP, DstPort: epB.Port, Proto: "TCP"},
+		{CaptureID: capA, No: 1, Time: base.Add(1 * time.Second), SrcIP: epB.IP, SrcPort: epB.Port, DstIP: epA.IP, DstPort: epA.Port, Proto: "TCP"},
+		{CaptureID: capA, No: 9, Time: base.Add(2 * time.Second), SrcIP: "10.1.1.9", SrcPort: 9999, DstIP: epB.IP, DstPort: epB.Port, Proto: "TCP"}, // 干扰：另一条连接
+	}); err != nil {
+		t.Fatalf("SaveBatch cap-a: %v", err)
+	}
+	if err := pg.Packets().SaveBatch(ctx, capB, []storage.PacketRecord{
+		{CaptureID: capB, No: 3, Time: base.Add(3 * time.Second), SrcIP: epA.IP, SrcPort: epA.Port, DstIP: epB.IP, DstPort: epB.Port, Proto: "TLSv1.2"}, // ★ Proto 是展示名
+		{CaptureID: capB, No: 4, Time: time.Time{}, SrcIP: epA.IP, SrcPort: epA.Port, DstIP: epB.IP, DstPort: epB.Port, Proto: "TCP"},                   // 零时间 => NULL
+	}); err != nil {
+		t.Fatalf("SaveBatch cap-b: %v", err)
+	}
+
+	got, err := q.ListByEndpoints(ctx, epA, epB, storage.Page{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListByEndpoints: %v", err)
+	}
+	// ① 跨 capture + 双向 + 排除干扰包：应恰好 4 条（cap-a 两条 + cap-b 两条）。
+	if len(got.Items) != 4 {
+		t.Fatalf("Items len = %d, want 4（跨 capture + 双向 + 排除干扰）: %+v", len(got.Items), got.Items)
+	}
+	var sawAB, sawBA bool
+	for _, it := range got.Items {
+		if it.SrcIP == "10.1.1.9" {
+			t.Errorf("干扰包（10.1.1.9）不应被返回: %+v", it)
+		}
+		if it.SrcIP == epA.IP {
+			sawAB = true
+		}
+		if it.SrcIP == epB.IP {
+			sawBA = true
+		}
+	}
+	if !sawAB || !sawBA {
+		t.Errorf("两个方向都应返回: ab=%v ba=%v", sawAB, sawBA)
+	}
+
+	// ② 排序按 (time, capture_id, no)：1s(cap-a/1)、2s(cap-a/5)、3s(cap-b/3)，NULL 时间排最后。
+	want := []struct {
+		capID string
+		no    int
+	}{{capA, 1}, {capA, 5}, {capB, 3}, {capB, 4}}
+	for i, w := range want {
+		if got.Items[i].CaptureID != w.capID || got.Items[i].No != w.no {
+			t.Errorf("item[%d] = %s/%d, want %s/%d（★ 零时间应为 NULL 并排在最后）",
+				i, got.Items[i].CaptureID, got.Items[i].No, w.capID, w.no)
+		}
+	}
+	// ③ 每行都带自己的 capture_id（跨 capture 查询的关键）。
+	if got.Items[0].CaptureID != capA || got.Items[2].CaptureID != capB {
+		t.Errorf("capture_id 未按行返回: %+v", got.Items)
+	}
+	// ④ Total 沿用既有口径 -1（未统计）。
+	if got.Total != -1 {
+		t.Errorf("Total = %d, want -1（该实现不做统计）", got.Total)
+	}
+
+	// ⑤ 对称性：交换两端，结果必须一致。
+	rev, err := q.ListByEndpoints(ctx, epB, epA, storage.Page{Limit: 100})
+	if err != nil {
+		t.Fatalf("reverse ListByEndpoints: %v", err)
+	}
+	if len(rev.Items) != len(got.Items) {
+		t.Fatalf("reverse len = %d, want %d", len(rev.Items), len(got.Items))
+	}
+	for i := range rev.Items {
+		if rev.Items[i] != got.Items[i] {
+			t.Errorf("reverse item[%d] 不一致: %+v vs %+v", i, rev.Items[i], got.Items[i])
+		}
+	}
+
+	// ⑥ 分页：Limit=1 只返回 1 条。
+	one, err := q.ListByEndpoints(ctx, epA, epB, storage.Page{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListByEndpoints limit=1: %v", err)
+	}
+	if len(one.Items) != 1 {
+		t.Errorf("limit=1 len = %d, want 1", len(one.Items))
+	}
+	// ⑦ Offset 生效（取第 2 条）。
+	second, err := q.ListByEndpoints(ctx, epA, epB, storage.Page{Offset: 1, Limit: 1})
+	if err != nil {
+		t.Fatalf("ListByEndpoints offset=1: %v", err)
+	}
+	if len(second.Items) != 1 || second.Items[0].No != want[1].no {
+		t.Errorf("offset=1 => %+v, want no=%d", second.Items, want[1].no)
+	}
+
+	// ⑧ 查不存在的连接 => 空结果且无错误。
+	none, err := q.ListByEndpoints(ctx,
+		storage.Endpoint{IP: "192.0.2.1", Port: 1},
+		storage.Endpoint{IP: "192.0.2.2", Port: 2},
+		storage.Page{Limit: 10})
+	if err != nil {
+		t.Fatalf("不存在的连接应无错误: %v", err)
+	}
+	if len(none.Items) != 0 {
+		t.Errorf("不存在的连接 Items len = %d, want 0", len(none.Items))
 	}
 }
