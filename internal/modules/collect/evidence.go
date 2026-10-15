@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -21,6 +22,41 @@ type RangeReader interface {
 	ReadRange(from, to time.Time) ([]Frame, bool, error)
 }
 
+// Endpoint 连接的一端（IP + 端口）。
+//
+// ★ 这是本包自己的最小投影：故意不复用 storage.Endpoint，避免 collect 依赖 storage 包
+// （模块之间不许互相耦合）。
+type Endpoint struct {
+	IP   string
+	Port uint16
+}
+
+// PacketRef 指向"某个 capture 文件里的第 No 个包"：库里只存元数据，
+// 原始字节在 packetstore 的文件里，取帧要凭这两个字段。
+type PacketRef struct {
+	CaptureID string
+	No        int
+}
+
+// ConnPacket 是"按连接查包"结果的最小投影（只取取帧与排序需要的字段）。
+type ConnPacket struct {
+	CaptureID string
+	No        int
+	Time      time.Time
+}
+
+// FlowQuerier 按连接（两个端点、双向）查包元数据；total 是匹配总数（可能大于本页）。
+// 装配层用 storage.PacketFlowQuerier（11-7b）适配它。
+type FlowQuerier interface {
+	ListByConn(ctx context.Context, a, b Endpoint, limit int) (items []ConnPacket, total int, err error)
+}
+
+// FrameFetcher 按 (captureID, No) 取回**原始帧**。
+// 装配层用 packetstore.ReadRaw + pcapng.Parse 适配它（本包不做解析）。
+type FrameFetcher interface {
+	FetchFrames(ctx context.Context, refs []PacketRef) ([]Frame, error)
+}
+
 // EvidenceOptions 证据提取配置。
 type EvidenceOptions struct {
 	Dir       string        // 证据根目录（默认 "evidence"）
@@ -28,6 +64,8 @@ type EvidenceOptions struct {
 	LinkType  int           // 链路类型（1 = Ethernet）
 	Window    time.Duration // 前后各多久（默认 5s）
 	MaxBytes  int64         // 单文件上限（默认 256<<20）
+	Querier   FlowQuerier   // 可选：按连接查库（nil = 不查库）
+	Frames    FrameFetcher  // 可选：按 (captureID, No) 取原始帧（nil = 不取库里的帧）
 }
 
 const (
@@ -76,6 +114,8 @@ type evidenceWindow struct {
 	// connKeys 是本窗口涉及的全部连接键（对称双向）。11-7c-1 用它把证据从“窗口内的帧”
 	// 升级为“这些连接在内存环里的全部帧”。
 	connKeys map[string]struct{}
+	// connEP 是连接键 -> 该连接的两个端点（用于"按连接查库"补齐）。同一个键只记一次。
+	connEP map[string][2]Endpoint
 }
 
 // addConnKey 记录本窗口涉及的连接键；空串不加入（避免脏键）。惰性建 map，兼容零值窗口。
@@ -87,6 +127,28 @@ func (w *evidenceWindow) addConnKey(k string) {
 		w.connKeys = make(map[string]struct{})
 	}
 	w.connKeys[k] = struct{}{}
+}
+
+// addConnEndpoints 记录连接键对应的两个端点（供"按连接查库"用）；空键不记。
+// 同一个键重复覆盖无所谓：连接键由端点决定。
+func (w *evidenceWindow) addConnEndpoints(k string, a, b Endpoint) {
+	if k == "" {
+		return
+	}
+	if w.connEP == nil {
+		w.connEP = make(map[string][2]Endpoint)
+	}
+	w.connEP[k] = [2]Endpoint{a, b}
+}
+
+// sortedConnKeys 返回窗口里的连接键（字典序），保证遍历顺序稳定、便于测试与复现。
+func sortedConnKeys(w *evidenceWindow) []string {
+	out := make([]string, 0, len(w.connKeys))
+	for k := range w.connKeys {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ringEarliestByConn 返回环里每个“有连接键的帧”的连接键 -> 该连接在环内最早帧时间。
@@ -158,6 +220,11 @@ type EvidenceCollector struct {
 	ring *Ring
 	disk RangeReader
 
+	// 可选依赖（nil = 不启用该路，行为与既有完全一致）：
+	// querier 按连接查库元数据，fetcher 按 (captureID, No) 取回库里的原始帧。
+	querier FlowQuerier
+	fetcher FrameFetcher
+
 	pending []*evidenceWindow
 }
 
@@ -183,6 +250,8 @@ func NewEvidence(opts EvidenceOptions, ring *Ring, disk RangeReader) *EvidenceCo
 		maxBytes: opts.MaxBytes,
 		ring:     ring,
 		disk:     disk,
+		querier:  opts.Querier,
+		fetcher:  opts.Frames,
 	}
 }
 
@@ -206,6 +275,12 @@ func (e *EvidenceCollector) OnAlert(ev alert.Event) {
 		ConnKey: datamodel.ConnKey(ev.Alert.SrcIP, ev.Alert.SrcPort, ev.Alert.DstIP, ev.Alert.DstPort),
 	}
 
+	// ★ 11-7c-2：连接的两个端点（供“按连接查库”补齐用）。空键不记，保持既有行为。
+	ep := [2]Endpoint{
+		{IP: ev.Alert.SrcIP, Port: ev.Alert.SrcPort},
+		{IP: ev.Alert.DstIP, Port: ev.Alert.DstPort},
+	}
+
 	for _, w := range e.pending {
 		// 新告警的窗口 [from,to] 与已有待收集窗口重叠 -> 并入。
 		if !to.Before(w.from) && !from.After(w.to) {
@@ -214,6 +289,7 @@ func (e *EvidenceCollector) OnAlert(ev alert.Event) {
 			}
 			w.alerts = append(w.alerts, ref)
 			w.addConnKey(ref.ConnKey)
+			w.addConnEndpoints(ref.ConnKey, ep[0], ep[1])
 			return
 		}
 	}
@@ -224,6 +300,7 @@ func (e *EvidenceCollector) OnAlert(ev alert.Event) {
 		alerts: []AlertRef{ref},
 	}
 	w.addConnKey(ref.ConnKey)
+	w.addConnEndpoints(ref.ConnKey, ep[0], ep[1])
 	e.pending = append(e.pending, w)
 }
 
@@ -319,13 +396,64 @@ func (e *EvidenceCollector) flushWindow(w *evidenceWindow) (string, error) {
 		}
 	}
 
+	// 只有"磁盘报告完整覆盖"时才 incomplete=false；disk==nil 也算不完整。
+	incomplete := !complete
+
+	// notes 是"如实标注原因"的累加器（既有判据 + 库侧标注），最终拼成边车 Reason。
+	var notes []string
+
+	// ★ 11-7c-2：库侧补齐 —— 把该连接"已出留存窗口、已入库"的包元数据查回来，再按
+	// (captureID, No) 取回原始帧并并入证据。只有同时给了 Querier 与 Frames 才启用；
+	// 否则完全保持既有行为（nil = 不启用，sources 里也不会出现 "db"）。
+	//
+	// ★ ctx：flushWindow 现在没有 context 参数，为不改 Tick/Close 的签名，这里用
+	// context.Background()（取舍：库侧查询不参与调用方取消；本任务只接入接口与流程）。
+	if e.querier != nil && e.fetcher != nil && len(w.connEP) > 0 {
+		ctx := context.Background()
+		// dbPageLimit 是单次查询上限：避免一次拉过多元数据；total>len(items) 时如实标注不完整。
+		const dbPageLimit = 1000
+		var refs []PacketRef
+		dbIncomplete := ""
+		for _, k := range sortedConnKeys(w) { // ★ 顺序稳定，便于测试与复现
+			ep, ok := w.connEP[k]
+			if !ok {
+				continue
+			}
+			items, total, err := e.querier.ListByConn(ctx, ep[0], ep[1], dbPageLimit)
+			if err != nil {
+				// 库侧查询失败不让整次取证失败：记入 notes/Reason，继续其余连接。
+				notes = append(notes, fmt.Sprintf("按连接 %s 查库失败：%v", k, err))
+				incomplete = true
+				continue
+			}
+			for _, it := range items {
+				refs = append(refs, PacketRef{CaptureID: it.CaptureID, No: it.No})
+			}
+			if total > len(items) {
+				dbIncomplete = fmt.Sprintf("连接 %s 在库里还有更多包未取（本次上限 %d）", k, dbPageLimit)
+			}
+		}
+		if len(refs) > 0 {
+			dbFrames, err := e.fetcher.FetchFrames(ctx, refs)
+			if err != nil {
+				// 取帧失败同样不让整次取证失败：记入 notes/Reason。
+				notes = append(notes, fmt.Sprintf("按 (captureID, No) 取库里的帧失败：%v", err))
+				incomplete = true
+			} else if len(dbFrames) > 0 {
+				frames = mergeFrames(frames, dbFrames) // 复用既有去重（时间 + 字节哈希）
+				sources = append(sources, "db")        // ★ 新来源名
+			}
+		}
+		if dbIncomplete != "" {
+			incomplete = true
+			notes = append(notes, dbIncomplete)
+		}
+	}
+
 	// 结果按时间升序稳定排序（时间相同保持原顺序：磁盘帧在前）。
 	sort.SliceStable(frames, func(i, j int) bool {
 		return frames[i].Time.Before(frames[j].Time)
 	})
-
-	// 只有"磁盘报告完整覆盖"时才 incomplete=false；disk==nil 也算不完整。
-	incomplete := !complete
 
 	dir := filepath.Join(e.dir, e.capID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -344,7 +472,6 @@ func (e *EvidenceCollector) flushWindow(w *evidenceWindow) (string, error) {
 		return "", err
 	}
 
-	var notes []string
 	if len(frames) == 0 {
 		notes = append(notes, "两侧都没有数据（磁盘与内存环均为空）")
 	}

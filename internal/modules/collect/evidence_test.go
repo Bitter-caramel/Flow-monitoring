@@ -2,7 +2,9 @@ package collect
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -554,5 +556,235 @@ func TestEvidenceConnTruncationInference(t *testing.T) {
 	metaB := run(t, true)
 	if strings.Contains(metaB.Reason, keyA) {
 		t.Fatalf("scenario B: Reason=%q must NOT blame conn key %q", metaB.Reason, keyA)
+	}
+}
+
+// ───────────────────────── 11-7c-2：库侧补齐（全部用假实现） ─────────────────────────
+
+// fakeQuerier 假 FlowQuerier：对任何连接都返回同一批预置结果（本组测试只有一条连接）。
+// total 为 0 时取 len(items)（表示"库侧没有更多"）。
+type fakeQuerier struct {
+	items     []ConnPacket
+	total     int
+	err       error
+	lastLimit int
+}
+
+func (f *fakeQuerier) ListByConn(_ context.Context, _, _ Endpoint, limit int) ([]ConnPacket, int, error) {
+	f.lastLimit = limit
+	if f.err != nil {
+		return nil, 0, f.err
+	}
+	total := f.total
+	if total == 0 {
+		total = len(f.items)
+	}
+	return f.items, total, nil
+}
+
+// fakeFetcher 假 FrameFetcher：按 (captureID, No) 返回预置帧；未预置的跳过。
+type fakeFetcher struct {
+	frames map[PacketRef]Frame
+	err    error
+}
+
+func (f *fakeFetcher) FetchFrames(_ context.Context, refs []PacketRef) ([]Frame, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []Frame
+	for _, r := range refs {
+		if fr, ok := f.frames[r]; ok {
+			out = append(out, fr)
+		}
+	}
+	return out, nil
+}
+
+// asFrame 把测试包转成证据帧（深拷贝 Data，避免与测试用例共享底层数组）。
+func asFrame(p *datamodel.Packet) Frame {
+	return Frame{Time: p.Time, No: p.No, Data: append([]byte(nil), p.Data...)}
+}
+
+// dbTestEnv 造"环里只有连接 A 一帧（落在窗口内）+ 一条属于 A 的告警"的最小场景。
+// 返回 collector 与"可以 Tick 的时间"（= 告警时间 + 窗口）。
+func dbTestEnv(t *testing.T, base time.Time, opts EvidenceOptions, ring *Ring) (*EvidenceCollector, time.Time) {
+	t.Helper()
+	const window = 2 * time.Second
+	alertT := base.Add(5 * time.Second)
+	opts.Dir = filepath.Join(t.TempDir(), "evidence")
+	opts.CaptureID = "cap1"
+	opts.LinkType = 1
+	opts.Window = window
+	if opts.MaxBytes == 0 {
+		opts.MaxBytes = 1 << 20
+	}
+	coll := NewEvidence(opts, ring, nil)
+	coll.OnAlert(alert.Event{Alert: detect.Alert{
+		RuleID: "r1", Name: "conn", Time: alertT, PktNo: 2,
+		SrcIP: "10.0.0.1", SrcPort: 1111, DstIP: "10.0.0.2", DstPort: 80,
+	}})
+	return coll, alertT.Add(window)
+}
+
+// TestEvidenceDBBackfillAddsFrames 守的是 11-7c-2 的主路径：
+// 装上 Querier/Frames 后，库里那些"已出留存窗口"的包会被取回并并入证据，且 Sources 含 "db"。
+func TestEvidenceDBBackfillAddsFrames(t *testing.T) {
+	base := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
+	ring := NewRing(RingOptions{MaxBytes: 1 << 20, Window: time.Hour})
+	ring.Add(newConnPkt(1, base.Add(5*time.Second), 40, "10.0.0.1", 1111, "10.0.0.2", 80))
+
+	dbPkt := newConnPkt(100, base.Add(1*time.Second), 48, "10.0.0.1", 1111, "10.0.0.2", 80)
+	q := &fakeQuerier{items: []ConnPacket{{CaptureID: "capX", No: 100, Time: dbPkt.Time}}}
+	f := &fakeFetcher{frames: map[PacketRef]Frame{{CaptureID: "capX", No: 100}: asFrame(dbPkt)}}
+
+	coll, tickAt := dbTestEnv(t, base, EvidenceOptions{Querier: q, Frames: f}, ring)
+	files, err := coll.Tick(tickAt)
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("want 1 evidence file, got %d (%v)", len(files), files)
+	}
+
+	meta := loadMeta(t, files[0])
+	if !sliceHas(meta.Sources, "db") {
+		t.Fatalf("sources=%v, want contain db", meta.Sources)
+	}
+	captured, _ := parseEvidence(t, files[0])
+	found := false
+	for _, p := range captured.Packets {
+		if bytes.Equal(p.Data, dbPkt.Data) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("证据里没有库侧帧（No=100/48 字节）：packets=%d", len(captured.Packets))
+	}
+	if q.lastLimit != 1000 {
+		t.Errorf("ListByConn limit = %d, want 1000（dbPageLimit）", q.lastLimit)
+	}
+}
+
+// TestEvidenceDBBackfillDedupsSameFrame 守的是"库侧帧与环里帧同时间同字节时只算一次"：
+// 去重复用既有的 mergeFrames（帧时间 + 帧字节哈希），库侧不得把同一帧记两遍。
+func TestEvidenceDBBackfillDedupsSameFrame(t *testing.T) {
+	base := time.Date(2024, 6, 2, 0, 0, 0, 0, time.UTC)
+	ring := NewRing(RingOptions{MaxBytes: 1 << 20, Window: time.Hour})
+	same := newConnPkt(7, base.Add(5*time.Second), 40, "10.0.0.1", 1111, "10.0.0.2", 80)
+	ring.Add(same)
+
+	// 库里返回"同一帧"（同时间、同字节）=> 必须被去重掉。
+	q := &fakeQuerier{items: []ConnPacket{{CaptureID: "capX", No: 7, Time: same.Time}}}
+	f := &fakeFetcher{frames: map[PacketRef]Frame{{CaptureID: "capX", No: 7}: asFrame(same)}}
+
+	coll, tickAt := dbTestEnv(t, base, EvidenceOptions{Querier: q, Frames: f}, ring)
+	files, err := coll.Tick(tickAt)
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	meta := loadMeta(t, files[0])
+	if meta.Packets != 1 {
+		t.Fatalf("meta.Packets = %d, want 1（同一帧被去重，不得记两遍）", meta.Packets)
+	}
+	captured, _ := parseEvidence(t, files[0])
+	if len(captured.Packets) != 1 {
+		t.Fatalf("证据里帧数 = %d, want 1", len(captured.Packets))
+	}
+}
+
+// TestEvidenceDBBackfillIncomplete 守的是"库侧还有更多包未取"要**如实标注**。
+func TestEvidenceDBBackfillIncomplete(t *testing.T) {
+	base := time.Date(2024, 6, 3, 0, 0, 0, 0, time.UTC)
+	ring := NewRing(RingOptions{MaxBytes: 1 << 20, Window: time.Hour})
+	ring.Add(newConnPkt(1, base.Add(5*time.Second), 40, "10.0.0.1", 1111, "10.0.0.2", 80))
+
+	dbPkt := newConnPkt(200, base.Add(1*time.Second), 32, "10.0.0.1", 1111, "10.0.0.2", 80)
+	q := &fakeQuerier{items: []ConnPacket{{CaptureID: "capX", No: 200, Time: dbPkt.Time}}, total: 5}
+	f := &fakeFetcher{frames: map[PacketRef]Frame{{CaptureID: "capX", No: 200}: asFrame(dbPkt)}}
+
+	coll, tickAt := dbTestEnv(t, base, EvidenceOptions{Querier: q, Frames: f}, ring)
+	files, err := coll.Tick(tickAt)
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	meta := loadMeta(t, files[0])
+	if !meta.Incomplete {
+		t.Fatalf("Incomplete=false, want true（total=5 但只取到 1 条）")
+	}
+	if !strings.Contains(meta.Reason, "库里还有更多包未取") {
+		t.Fatalf("Reason=%q, want mention 库里还有更多包未取", meta.Reason)
+	}
+}
+
+// TestEvidenceDBBackfillErrorsDoNotFail 守的是"库侧出错不让整次取证失败"：
+// 查库失败与取帧失败都只记进 Reason/Incomplete，仍要产出证据文件。
+func TestEvidenceDBBackfillErrorsDoNotFail(t *testing.T) {
+	base := time.Date(2024, 6, 4, 0, 0, 0, 0, time.UTC)
+
+	t.Run("查库失败", func(t *testing.T) {
+		ring := NewRing(RingOptions{MaxBytes: 1 << 20, Window: time.Hour})
+		ring.Add(newConnPkt(1, base.Add(5*time.Second), 40, "10.0.0.1", 1111, "10.0.0.2", 80))
+		coll, tickAt := dbTestEnv(t, base, EvidenceOptions{
+			Querier: &fakeQuerier{err: errors.New("db down")},
+			Frames:  &fakeFetcher{},
+		}, ring)
+		files, err := coll.Tick(tickAt)
+		if err != nil {
+			t.Fatalf("查库失败不应让取证失败：%v", err)
+		}
+		if len(files) != 1 {
+			t.Fatalf("want 1 evidence file, got %d", len(files))
+		}
+		meta := loadMeta(t, files[0])
+		if !meta.Incomplete || !strings.Contains(meta.Reason, "查库失败") {
+			t.Fatalf("Incomplete=%v Reason=%q, want 标注查库失败", meta.Incomplete, meta.Reason)
+		}
+		if sliceHas(meta.Sources, "db") {
+			t.Fatalf("sources=%v：没有取到任何库侧帧时不应出现 db", meta.Sources)
+		}
+	})
+
+	t.Run("取帧失败", func(t *testing.T) {
+		ring := NewRing(RingOptions{MaxBytes: 1 << 20, Window: time.Hour})
+		ring.Add(newConnPkt(1, base.Add(5*time.Second), 40, "10.0.0.1", 1111, "10.0.0.2", 80))
+		coll, tickAt := dbTestEnv(t, base, EvidenceOptions{
+			Querier: &fakeQuerier{items: []ConnPacket{{CaptureID: "capX", No: 9, Time: base.Add(1 * time.Second)}}},
+			Frames:  &fakeFetcher{err: errors.New("file missing")},
+		}, ring)
+		files, err := coll.Tick(tickAt)
+		if err != nil {
+			t.Fatalf("取帧失败不应让取证失败：%v", err)
+		}
+		meta := loadMeta(t, files[0])
+		if !meta.Incomplete || !strings.Contains(meta.Reason, "取库里的帧失败") {
+			t.Fatalf("Incomplete=%v Reason=%q, want 标注取帧失败", meta.Incomplete, meta.Reason)
+		}
+	})
+}
+
+// TestEvidenceNoOptionalDepsUnchanged 守的是"不装可选依赖时行为完全不变"：
+// 即使库里有很多包，未装 Querier/Frames 就一个都不取，Sources 里也不会出现 "db"。
+func TestEvidenceNoOptionalDepsUnchanged(t *testing.T) {
+	base := time.Date(2024, 6, 5, 0, 0, 0, 0, time.UTC)
+	ring := NewRing(RingOptions{MaxBytes: 1 << 20, Window: time.Hour})
+	// 另一条连接更早的一帧：避免触发 11-7c-1 的"可能被截断"推断，让断言更聚焦。
+	ring.Add(newConnPkt(90, base.Add(0*time.Second), 40, "10.9.9.9", 2222, "10.9.9.8", 443))
+	ring.Add(newConnPkt(1, base.Add(5*time.Second), 40, "10.0.0.1", 1111, "10.0.0.2", 80))
+
+	coll, tickAt := dbTestEnv(t, base, EvidenceOptions{}, ring) // 不装 Querier/Frames
+	files, err := coll.Tick(tickAt)
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	meta := loadMeta(t, files[0])
+	if sliceHas(meta.Sources, "db") {
+		t.Fatalf("sources=%v：未装可选依赖时不应出现 db", meta.Sources)
+	}
+	captured, _ := parseEvidence(t, files[0])
+	for _, p := range captured.Packets {
+		if len(p.Data) == 48 {
+			t.Fatalf("未装可选依赖却出现了库侧帧（48 字节）")
+		}
 	}
 }
