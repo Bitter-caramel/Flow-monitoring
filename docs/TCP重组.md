@@ -280,8 +280,22 @@ func payloadOffset(p *datamodel.Packet, payload []byte) int {
 | 子任务 | 内容 | 状态 |
 |---|---|---|
 | **11-7a** | `datamodel.ConnKey`（**对称**的双向连接键）+ `Ring` 的「连接 → 帧」索引（**收包即分组**） | ✅ 已落地 |
-| **11-7b** | `storage.PacketStore` 加「按四元组双向查包」+ PG 实现 + `schema.sql` 加索引 | 待做 |
+| **11-7b** | `storage.PacketStore` 加「按四元组双向查包」+ PG 实现 + `schema.sql` 加索引 | ✅ 已落地（**改为可选接口**，见下） |
 | **11-7c** | 证据组装：该连接的 **ring 帧 + 已入库包** → 按 `(captureID, No)` 从文件取回**原始帧** → `.pcap` + meta 如实标注完整性 | 待做 |
+
+**11-7b 的要点（已落地）**：
+- ★★ **没有把 `ListByEndpoints` 加进 `PacketStore` 接口，而是做成"可选扩展"`storage.PacketFlowQuerier`**
+  （调用方做类型断言：`if q, ok := st.Packets().(storage.PacketFlowQuerier); ok { ... }`）。
+  **原因（实测踩到）**：往 `PacketStore` 加一个方法，**所有实现者都要跟上** ——
+  PG 实现 + **`common/hoststore` 的插件侧 RPC 适配器** + **4 个测试替身**
+  （`kernel/storage`、`importer`、`packetstore`、`query` 各一个），还会牵动**跨进程 RPC 协议**；
+  而当前**只有宿主进程内**的证据导出需要这个能力 ⇒ 可选接口**零连带**，`go build` 立刻恢复。
+- `Endpoint{IP, Port}` + PG 的 `ListByEndpoints`（`WHERE (a,b) OR (b,a)`，`ORDER BY time, capture_id, no`）
+  + `schema.sql` 追加 `idx_packets_endpoints` 索引（纯追加）。
+- ★ 注意 `PacketRecord.Proto` 是**展示名**（`"TLSv1.2"`），拿 `FlowKey` 的 `/tcp` 匹配不上 ⇒ 按四元组查。
+- ★ 可选的**跨进程 RPC 扩展**留到"插件也需要按连接取包"时再做（YAGNI）。
+- 验证：`TestPacketStore_ListByEndpoints`（双向 / 对称 / 排序含同刻 tie-break / 分页 / 空结果）；
+  ★ 变异检验（内存替身只匹配单向）⇒ 该测试立刻红 ✓。
 
 **11-7a 的要点（已落地）**：
 - `ConnKey(srcIP, srcPort, dstIP, dstPort)`：每端拼 `"ip:port"`，**两端按字典序排序后拼接** ⇒

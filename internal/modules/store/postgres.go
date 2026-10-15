@@ -84,9 +84,9 @@ type captureStore struct{ p *Postgres }
 
 func (s *captureStore) Create(ctx context.Context, rec *storage.CaptureRecord) error {
 	_, err := s.p.pool.Exec(ctx, `
-		INSERT INTO captures
-			(id, name, format, link_type, packet_count, byte_size, file_path, sha256, first_seen, last_seen, imported_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+                INSERT INTO captures
+                        (id, name, format, link_type, packet_count, byte_size, file_path, sha256, first_seen, last_seen, imported_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 		rec.ID, rec.Name, rec.Format, rec.LinkType, rec.PacketCount,
 		rec.ByteSize, rec.FilePath, rec.SHA256,
 		nullableTime(rec.FirstSeen), nullableTime(rec.LastSeen), rec.ImportedAt,
@@ -102,8 +102,8 @@ func (s *captureStore) Create(ctx context.Context, rec *storage.CaptureRecord) e
 
 func (s *captureStore) Get(ctx context.Context, id string) (*storage.CaptureRecord, error) {
 	row := s.p.pool.QueryRow(ctx, `
-		SELECT id, name, format, link_type, packet_count, byte_size, file_path, sha256, first_seen, last_seen, imported_at
-		FROM captures WHERE id = $1`, id)
+                SELECT id, name, format, link_type, packet_count, byte_size, file_path, sha256, first_seen, last_seen, imported_at
+                FROM captures WHERE id = $1`, id)
 
 	var rec storage.CaptureRecord
 	var firstSeen, lastSeen *time.Time
@@ -127,8 +127,8 @@ func (s *captureStore) Get(ctx context.Context, id string) (*storage.CaptureReco
 
 func (s *captureStore) List(ctx context.Context, page storage.Page) (*storage.PageResult[storage.CaptureRecord], error) {
 	rows, err := s.p.pool.Query(ctx, `
-		SELECT id, name, format, link_type, packet_count, byte_size, file_path, sha256, first_seen, last_seen, imported_at
-		FROM captures ORDER BY imported_at DESC LIMIT $1 OFFSET $2`,
+                SELECT id, name, format, link_type, packet_count, byte_size, file_path, sha256, first_seen, last_seen, imported_at
+                FROM captures ORDER BY imported_at DESC LIMIT $1 OFFSET $2`,
 		page.Limit, page.Offset,
 	)
 	if err != nil {
@@ -171,6 +171,11 @@ func (s *captureStore) Delete(ctx context.Context, id string) error {
 // packetStore PacketStore 的 PostgreSQL 实现。
 type packetStore struct{ p *Postgres }
 
+// ★ 编译期断言：PG 实现必须提供「按连接（四元组双向）查包」这个**可选扩展**
+// （storage.PacketFlowQuerier）。它故意不并进 storage.PacketStore —— 那样会连带
+// 要求插件侧 RPC 适配器与若干测试替身都实现，并牵动跨进程 RPC 协议。
+var _ storage.PacketFlowQuerier = (*packetStore)(nil)
+
 func (s *packetStore) SaveBatch(ctx context.Context, captureID string, packets []storage.PacketRecord) error {
 	if len(packets) == 0 {
 		return nil
@@ -196,8 +201,8 @@ func (s *packetStore) SaveBatch(ctx context.Context, captureID string, packets [
 
 func (s *packetStore) ListByCapture(ctx context.Context, captureID string, page storage.Page) (*storage.PageResult[storage.PacketRecord], error) {
 	rows, err := s.p.pool.Query(ctx, `
-		SELECT no, time, src_ip, dst_ip, src_port, dst_port, proto, info, cap_len, orig_len
-		FROM packets WHERE capture_id = $1 ORDER BY no ASC LIMIT $2 OFFSET $3`,
+                SELECT no, time, src_ip, dst_ip, src_port, dst_port, proto, info, cap_len, orig_len
+                FROM packets WHERE capture_id = $1 ORDER BY no ASC LIMIT $2 OFFSET $3`,
 		captureID, page.Limit, page.Offset,
 	)
 	if err != nil {
@@ -216,6 +221,38 @@ func (s *packetStore) ListByCapture(ctx context.Context, captureID string, page 
 			return nil, fmt.Errorf("store: scan packet: %w", err)
 		}
 		pk.CaptureID = captureID
+		if ts != nil {
+			pk.Time = *ts
+		}
+		items = append(items, pk)
+	}
+	return &storage.PageResult[storage.PacketRecord]{Items: items, Total: -1}, rows.Err()
+}
+
+func (s *packetStore) ListByEndpoints(ctx context.Context, ep1, ep2 storage.Endpoint, page storage.Page) (*storage.PageResult[storage.PacketRecord], error) {
+	rows, err := s.p.pool.Query(ctx, `
+                SELECT capture_id, no, time, src_ip, dst_ip, src_port, dst_port, proto, info, cap_len, orig_len
+                FROM packets
+                WHERE (src_ip = $1 AND src_port = $2 AND dst_ip = $3 AND dst_port = $4)
+                   OR (src_ip = $3 AND src_port = $4 AND dst_ip = $1 AND dst_port = $2)
+                ORDER BY time ASC, capture_id ASC, no ASC LIMIT $5 OFFSET $6`,
+		ep1.IP, int(ep1.Port), ep2.IP, int(ep2.Port), page.Limit, page.Offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: list packets by endpoints: %w", err)
+	}
+	defer rows.Close()
+
+	var items []storage.PacketRecord
+	for rows.Next() {
+		var pk storage.PacketRecord
+		var ts *time.Time
+		if err := rows.Scan(
+			&pk.CaptureID, &pk.No, &ts, &pk.SrcIP, &pk.DstIP, &pk.SrcPort, &pk.DstPort,
+			&pk.Proto, &pk.Info, &pk.CapLen, &pk.OrigLen,
+		); err != nil {
+			return nil, fmt.Errorf("store: scan packet: %w", err)
+		}
 		if ts != nil {
 			pk.Time = *ts
 		}

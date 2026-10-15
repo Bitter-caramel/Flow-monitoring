@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -198,5 +199,145 @@ func TestStorage_Close(t *testing.T) {
 	}
 	if !s.closed {
 		t.Error("closed should be true")
+	}
+}
+
+// ListByEndpoints 内存替身：把已存的所有 capture 的包中匹配 (ep1→ep2) 或
+// (ep2→ep1) 的挑出来，按 (Time, CaptureID, No) 升序排序并分页。
+// Total 与 ListByCapture 保持一致，返回匹配总数（真值，非 -1）。
+func (s *memPacketStore) ListByEndpoints(_ context.Context, ep1, ep2 Endpoint, page Page) (*PageResult[PacketRecord], error) {
+	s.m.mu.Lock()
+	defer s.m.mu.Unlock()
+	var all []PacketRecord
+	for _, pkts := range s.m.packets {
+		for _, pk := range pkts {
+			src := Endpoint{IP: pk.SrcIP, Port: pk.SrcPort}
+			dst := Endpoint{IP: pk.DstIP, Port: pk.DstPort}
+			if (src == ep1 && dst == ep2) || (src == ep2 && dst == ep1) {
+				all = append(all, pk)
+			}
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if !all[i].Time.Equal(all[j].Time) {
+			return all[i].Time.Before(all[j].Time)
+		}
+		if all[i].CaptureID != all[j].CaptureID {
+			return all[i].CaptureID < all[j].CaptureID
+		}
+		return all[i].No < all[j].No
+	})
+	total := len(all)
+	start := page.Offset
+	if start > total {
+		start = total
+	}
+	end := start + page.Limit
+	if end > total {
+		end = total
+	}
+	items := append([]PacketRecord(nil), all[start:end]...)
+	return &PageResult[PacketRecord]{Items: items, Total: total}, nil
+}
+
+// TestPacketStore_ListByEndpoints 按四元组双向查包：双向、对称、排序、分页、空结果。
+func TestPacketStore_ListByEndpoints(t *testing.T) {
+	ctx := context.Background()
+	epA := Endpoint{IP: "10.0.0.1", Port: 1234}
+	epB := Endpoint{IP: "10.0.0.2", Port: 80}
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	s := newMemStorage()
+	// ★ ListByEndpoints 是**可选扩展**（PacketFlowQuerier），不在 PacketStore 里 ⇒
+	// 按「能力探测」的方式拿；拿不到说明替身没实现该能力。
+	q, ok := s.Packets().(PacketFlowQuerier)
+	if !ok {
+		t.Fatal("memPacketStore 未实现可选扩展 PacketFlowQuerier")
+	}
+	// 乱序插入 + 跨 capture + 干扰包（不同源 IP）。
+	if err := s.Packets().SaveBatch(ctx, "cap-b", []PacketRecord{
+		{CaptureID: "cap-b", No: 2, Time: base.Add(3 * time.Second), SrcIP: epA.IP, SrcPort: epA.Port, DstIP: epB.IP, DstPort: epB.Port, Proto: "TCP"},
+		{CaptureID: "cap-b", No: 1, Time: base.Add(1 * time.Second), SrcIP: epB.IP, SrcPort: epB.Port, DstIP: epA.IP, DstPort: epA.Port, Proto: "TCP"},
+	}); err != nil {
+		t.Fatalf("SaveBatch cap-b: %v", err)
+	}
+	if err := s.Packets().SaveBatch(ctx, "cap-a", []PacketRecord{
+		{CaptureID: "cap-a", No: 5, Time: base.Add(2 * time.Second), SrcIP: epA.IP, SrcPort: epA.Port, DstIP: epB.IP, DstPort: epB.Port, Proto: "TCP"},
+		{CaptureID: "cap-a", No: 9, Time: base.Add(2 * time.Second), SrcIP: "10.0.0.9", SrcPort: 9999, DstIP: epB.IP, DstPort: epB.Port, Proto: "TCP"},
+	}); err != nil {
+		t.Fatalf("SaveBatch cap-a: %v", err)
+	}
+
+	// 1. 只返回目标连接，且两个方向都在。
+	res, err := q.ListByEndpoints(ctx, epA, epB, Page{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListByEndpoints: %v", err)
+	}
+	if len(res.Items) != 3 {
+		t.Fatalf("Items len = %d, want 3", len(res.Items))
+	}
+	if res.Total != 3 {
+		t.Errorf("Total = %d, want 3", res.Total)
+	}
+	var sawAB, sawBA bool
+	for _, it := range res.Items {
+		if it.SrcIP == epA.IP && it.SrcPort == epA.Port {
+			sawAB = true
+		}
+		if it.SrcIP == epB.IP && it.SrcPort == epB.Port {
+			sawBA = true
+		}
+	}
+	if !sawAB || !sawBA {
+		t.Errorf("both directions should be present: ab=%v ba=%v", sawAB, sawBA)
+	}
+
+	// 2. 对称性：(epA,epB) 与 (epB,epA) 结果相同。
+	rev, err := q.ListByEndpoints(ctx, epB, epA, Page{Limit: 100})
+	if err != nil {
+		t.Fatalf("reverse ListByEndpoints: %v", err)
+	}
+	if len(rev.Items) != len(res.Items) {
+		t.Fatalf("reverse len = %d, want %d", len(rev.Items), len(res.Items))
+	}
+	for i := range rev.Items {
+		if rev.Items[i] != res.Items[i] {
+			t.Errorf("item[%d] mismatch: %+v vs %+v", i, rev.Items[i], res.Items[i])
+		}
+	}
+
+	// 3. 排序按 (Time, CaptureID, No) 升序。
+	want := []struct {
+		cap string
+		no  int
+	}{{"cap-b", 1}, {"cap-a", 5}, {"cap-b", 2}}
+	for i, w := range want {
+		if res.Items[i].CaptureID != w.cap || res.Items[i].No != w.no {
+			t.Errorf("item[%d] = %s/%d, want %s/%d", i, res.Items[i].CaptureID, res.Items[i].No, w.cap, w.no)
+		}
+	}
+
+	// 4. page.Limit = 1 只返回 1 条。
+	one, err := q.ListByEndpoints(ctx, epA, epB, Page{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListByEndpoints limit=1: %v", err)
+	}
+	if len(one.Items) != 1 {
+		t.Errorf("limit=1 len = %d, want 1", len(one.Items))
+	}
+	if one.Total != 3 {
+		t.Errorf("limit=1 Total = %d, want 3", one.Total)
+	}
+
+	// 5. 查不存在的连接 ⇒ Items 为空且 err == nil。
+	none, err := q.ListByEndpoints(ctx, Endpoint{IP: "1.1.1.1", Port: 1}, Endpoint{IP: "2.2.2.2", Port: 2}, Page{Limit: 10})
+	if err != nil {
+		t.Fatalf("missing conn err = %v, want nil", err)
+	}
+	if len(none.Items) != 0 {
+		t.Errorf("missing conn len = %d, want 0", len(none.Items))
+	}
+	if none.Total != 0 {
+		t.Errorf("missing conn Total = %d, want 0", none.Total)
 	}
 }

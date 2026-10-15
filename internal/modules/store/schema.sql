@@ -33,3 +33,7 @@ CREATE TABLE IF NOT EXISTS packets (
 );
 
 CREATE INDEX IF NOT EXISTS idx_packets_capture_no ON packets (capture_id, no);
+
+-- 11-7b：按四元组双向查包（证据导出按连接取包）
+CREATE INDEX IF NOT EXISTS idx_packets_endpoints
+    ON packets (src_ip, src_port, dst_ip, dst_port);
