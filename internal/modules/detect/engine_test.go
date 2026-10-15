@@ -409,10 +409,35 @@ func TestTransportNameKeepsFlowKeyStable(t *testing.T) {
 type fakeStream struct {
 	toServer []byte
 	toClient []byte
+	midstrm  bool
 }
 
 func (f fakeStream) BytesToServer() []byte { return f.toServer }
 func (f fakeStream) BytesToClient() []byte { return f.toClient }
+
+// Midstream 默认 false ⇒ 既有 stream 提取器测试保持全绿。
+func (f fakeStream) Midstream() bool { return f.midstrm }
+
+// TestStreamExtractorFallsBackToPayloadWhenMidstream 守的是 C′（窄口径防漏）：
+// 当流视图报告 Midstream（这条流出现过落在重组基准之前的段 ⇒ 重组视图不可信）时，
+// stream 提取器退化为单包匹配、返回本包 payload；其它情况仍取重组字节。
+//
+// ★ 接通检测侧之前这条测试是红的：extractStream 还没看 Midstream，恒返回 "STREAM"。
+func TestStreamExtractorFallsBackToPayloadWhenMidstream(t *testing.T) {
+	ex := extOf(t, rule.Buffer("stream"))
+	pkt := payloadPkt("PAYLOAD")
+	pkt.StreamDir = 0 // to_server
+
+	mid := fakeStream{toServer: []byte("STREAM"), midstrm: true}
+	if got := ex(&Ctx{Pkt: pkt, Stream: mid}); string(got) != "PAYLOAD" {
+		t.Fatalf("Midstream 应回落 payload=PAYLOAD, got=%q", got)
+	}
+
+	reliable := fakeStream{toServer: []byte("STREAM"), midstrm: false}
+	if got := ex(&Ctx{Pkt: pkt, Stream: reliable}); string(got) != "STREAM" {
+		t.Fatalf("非 Midstream 应取重组字节=STREAM, got=%q", got)
+	}
+}
 
 // TestStreamExtractorNilStream 守的是：没有重组器（Ctx.Stream == nil）时 stream 提取器
 // 必须返回 nil（缓冲区不存在），且以 stream 为唯一条件的规则整条不匹配（§5.4）。

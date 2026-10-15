@@ -196,6 +196,47 @@ byKey 仍持旧 stream=true`）。后果：同一四元组复用时旧缓冲会�
 ★ **PM 建议**：**先做 (C) + (D)**（防漏 + 清理陈旧引用，风险可控、语义清晰、可测），
 把 **(A)** 记为 P2 备选（要做就得连带处理"预缓冲期的检测语义"），**(B)** 与 (C) 二选一即可。
 
+### 7.4 11-6c-fix 已落地（C′ + D），并**顺带照出一个解码器缺陷**
+
+**C′（窄口径防漏）+ D（清理陈旧引用）已实现**：
+- D：`evict` 的清理抽成 `dropStream(s)`，`stream.ReassemblyComplete` 先 `dropStream` 再 `return true`
+  ⇒ 双向 FIN 后我们自己的 `byKey`/`byID` 与缓冲也一并释放（不再留陈旧引用）。
+- C′：`stream` 记 `baseline[2]/seen[2]/unreliable`，`Reassembler` 记每包的 `preBaseline`；
+  两个 `reassembly.StreamView` 都提供 `Midstream()`（**空视图恒 false** ⇒「没有流」不等于「中途流」）；
+  `detect.extractStream` 在 `Midstream()` 为真时**回落 `extractPayload`**（本包单包匹配）。
+- 端到端守卫 `TestMidstreamReorderStillMatchedByPayload`：无 SYN + `[C,A,B]`、
+  规则 `stream; pcre:"/AAAAAA/"` ⇒ **恰好命中 1 次且是承载搁浅段的 A 包**（实测
+  `[No=2 sid=suricata-970021 buf=stream off=0]`）—— 接通检测侧之前这条是红的。
+- ★ 不变量：端到端 A/B/C 三组输出与 11-2 基线**逐字节一致** ⇒ 真实样本里没有越基准的段，
+  C′ 不触发（这就是"窄口径"的证据）。
+
+★★ **新发现的真实缺陷（与 C′ 无关，11-6c-fix 顺带照出来的）**：
+上面那条端到端守卫第一次跑时**命中 0 次**。探针查明原因不在 C′，而在**解码器**：
+
+```go
+// internal/modules/parse/decoder/layers.go:117
+func payloadOffset(p *datamodel.Packet, payload []byte) int {
+    off := len(p.Data) - len(payload)   // ★ 从帧尾反算
+    ...
+}
+```
+
+**只要帧尾有以太网填充就会偏**：以太网最小帧 60 字节，<60 字节的帧会被补零（真实网卡同样会补）。
+实测：`Ethernet(14)+IPv4(20)+TCP(20)+4` 的帧序列化后是 **60 字节**（尾部 2 字节 `00 00` 填充），
+真实载荷在 `Data[54:58]`，而解码器给出 `PayloadOff=56`（= 60−4）⇒ `extractPayload` 取到
+`Data[56:60] = "AA\x00\x00"` ⇒ 规则匹配不到 ✗。
+
+- **为什么一直没暴露**：合成夹具的规则全用 `stream`（走重组视图，不读 payload 偏移），
+  而真实样本里那唯一的小帧（No=16，55 字节）**抓包时没有被填充** ⇒ 恰好算对（55−1=54）；
+  直到 C′ 让"承载搁浅段的包"回落 `payload`，这条路径才第一次被合成夹具走到 ✗。
+- **影响面**：任何**带尾部填充的帧**（<60 字节）上的 payload 类规则（`payload` / 显式 `payload;`
+  / C′ 回落）都会读到**错位字节**（可能漏检，也可能误检）。
+- **临时处置**：11-6c-fix 里把那条端到端守卫的载荷换成 6 字节（帧恰好 60 字节、无填充），
+  **让该测试只验证 C′ 本身**，并在注释里写明原因。
+- **待修**：新增任务 **11-8（P0）修 `payloadOffset`** —— 不能再"从帧尾反算"，
+  而应按 **L2+L3+L4 头部长度**（或直接利用 `Packet.Data` 与 gopacket 给出的层偏移）计算；
+  并补"带尾部填充的帧"夹具（这类缺陷正是"夹具不覆盖就永远看不见"的典型）。
+
 ## 8. 顺带解锁：整条连接级证据（10-4 的 P1）
 
 有了按流字节流后，证据可从"时间窗"升级为"**整条连接**"：命中的流 → 导出该流的**全部包**

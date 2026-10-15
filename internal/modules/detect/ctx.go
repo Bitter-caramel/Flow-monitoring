@@ -16,6 +16,10 @@ import "flow-monitoring/internal/kernel/datamodel"
 type StreamView interface {
 	BytesToServer() []byte
 	BytesToClient() []byte
+	// Midstream 报告「重组视图不可信」：这条流出现过落在重组基准之前的段
+	// （中途抓包 + 乱序 ⇒ 这些段会永远搁浅，见 docs/TCP重组.md §7.3）。
+	// 它由 reassembly 侧实现；没有流（空视图）时为 false。
+	Midstream() bool
 }
 
 // Ctx 一次检测的输入单元。

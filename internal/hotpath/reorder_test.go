@@ -243,3 +243,41 @@ alert tcp any any -> any any (msg:"full"; stream; pcre:"/AAAABBBBCCCC/"; sid:970
 		t.Fatalf("补洞后应有新增命中：before=%d 行 after=%d 行", len(before), len(after))
 	}
 }
+
+// TestMidstreamReorderStillMatchedByPayload：中途抓包（无 SYN）+ 乱序 ⇒ C′（窄口径防漏）生效。
+//
+// 夹具 [C, A, B]（★ 故意不写 SYN，否则不是中途流，C′ 不触发）：
+//
+//	C=[1013,1019)="CCCCCC" 先到 ⇒ 把重组基准钉在 1013；
+//	A=[1001,1007)="AAAAAA"、B=[1007,1013)="BBBBBB" 都落在基准之前 ⇒ 段永久搁浅，
+//	重组视图里只剩 C 的 "CCCCCC"。
+//
+// 规则 `stream; pcre:"/AAAAAA/"`：
+//   - ★ 接通检测侧之前这条测试是红的：A 包的 stream 视图只有 "CCCCCC"，匹配不到 "AAAAAA"；
+//   - 接通后：C′ 让承载搁浅段的 A 包回落 payload（"AAAAAA"）⇒ 命中；C 包用 stream（只有
+//     "CCCCCC"）不命中；B 包回落 payload（"BBBBBB"）也不命中 ⇒ 恰好 1 次，命中 A 包。
+//
+// ★ 为什么载荷用 6 字节而不是 4 字节：以太网帧最小 60 字节，4 字节载荷只有 58 字节 ⇒
+// 序列化时尾部会补 2 字节零（真实网卡同样会补）⇒ 会踩到 decoder 的 payloadOffset 缺陷
+// （`decoder/layers.go` 用 `len(Data)-len(payload)` 从帧尾反算 ⇒ 有填充时偏移偏大，见 12.x）。
+// 6 字节载荷让帧恰好 60 字节、不带填充，从而**只验证 C′ 本身**（该 decoder 缺陷另开任务修）。
+func TestMidstreamReorderStillMatchedByPayload(t *testing.T) {
+	const rules = `alert tcp any any -> any any (msg:"x"; stream; pcre:"/AAAAAA/"; sid:970021;)`
+
+	c := tcpFrame(t, 1013, false, "CCCCCC") // [1013,1019)：先到，钉住基准
+	a := tcpFrame(t, 1001, false, "AAAAAA") // [1001,1007)：落在基准之前
+	b := tcpFrame(t, 1007, false, "BBBBBB") // [1007,1013)：落在基准之前
+
+	dir := t.TempDir()
+	path := writeFixture(t, dir, "midstream-reorder", [][]byte{c, a, b})
+	hits := runFixture(t, rules, path)
+
+	t.Logf("中途乱序命中(%d 行): %v", len(hits), hits)
+	if len(hits) != 1 {
+		t.Fatalf("应恰好命中 1 次（A 包回落 payload），实际 %d 行: %v", len(hits), hits)
+	}
+	const want = "No=2 sid=suricata-970021 buf=stream off=0"
+	if !containsLine(hits, want) {
+		t.Fatalf("应命中 A 包 %q，实际 %v", want, hits)
+	}
+}

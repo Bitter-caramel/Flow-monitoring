@@ -158,6 +158,11 @@ func extractStream(c *Ctx) []byte {
 	if c == nil || c.Pkt == nil || c.Stream == nil {
 		return nil
 	}
+	if c.Stream.Midstream() {
+		// ★ C′（窄口径防漏）：重组不可信 ⇒ 本包退化为单包匹配，绝不因为「流残缺」而漏检。
+		// 只对「真的出现过落在基准之前的段」的包/流生效，其它中途流照旧用 stream。
+		return extractPayload(c)
+	}
 	var b []byte
 	switch c.Pkt.StreamDir {
 	case 0:
