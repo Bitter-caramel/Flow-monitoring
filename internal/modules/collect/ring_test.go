@@ -268,3 +268,191 @@ func TestRingSliceSortedOutput(t *testing.T) {
 		}
 	}
 }
+
+// --- 任务 11-7a：Ring「连接 -> 帧」索引 ---
+
+// newConnTestPacket 构造带连接端点（IP/端口）的测试包。
+func newConnTestPacket(no int, ts time.Time, srcIP string, srcPort uint16, dstIP string, dstPort uint16, data []byte) *datamodel.Packet {
+	return &datamodel.Packet{
+		No:      no,
+		Time:    ts,
+		SrcIP:   srcIP,
+		SrcPort: srcPort,
+		DstIP:   dstIP,
+		DstPort: dstPort,
+		Data:    data,
+	}
+}
+
+// sumConnFrames 求所有连接索引里帧数之和，用于强不变量断言。
+func sumConnFrames(r *Ring) int {
+	total := 0
+	for _, k := range r.ConnKeys() {
+		total += len(r.FramesByConn(k))
+	}
+	return total
+}
+
+// TestRingFramesByConnGrouping 验证按连接分组正确：两个方向归到同一个键。
+func TestRingFramesByConnGrouping(t *testing.T) {
+	r := NewRing(RingOptions{MaxBytes: 1 << 20, Window: time.Hour})
+	base := time.Unix(1700000000, 0)
+
+	k1 := datamodel.ConnKey("10.0.0.1", 1000, "10.0.0.2", 80)
+	k2 := datamodel.ConnKey("10.0.0.3", 2000, "10.0.0.4", 443)
+
+	// 连接 1：3 帧，两个方向混着喂，时间递增。
+	r.Add(newConnTestPacket(1, base.Add(0*time.Second), "10.0.0.1", 1000, "10.0.0.2", 80, []byte("c1a")))
+	r.Add(newConnTestPacket(2, base.Add(1*time.Second), "10.0.0.2", 80, "10.0.0.1", 1000, []byte("c1b")))
+	r.Add(newConnTestPacket(3, base.Add(2*time.Second), "10.0.0.1", 1000, "10.0.0.2", 80, []byte("c1c")))
+	// 连接 2：3 帧，同样两个方向混合。
+	r.Add(newConnTestPacket(4, base.Add(3*time.Second), "10.0.0.3", 2000, "10.0.0.4", 443, []byte("c2a")))
+	r.Add(newConnTestPacket(5, base.Add(4*time.Second), "10.0.0.4", 443, "10.0.0.3", 2000, []byte("c2b")))
+	r.Add(newConnTestPacket(6, base.Add(5*time.Second), "10.0.0.3", 2000, "10.0.0.4", 443, []byte("c2c")))
+
+	g1 := r.FramesByConn(k1)
+	if len(g1) != 3 {
+		t.Fatalf("FramesByConn(k1) = %d frames, want 3", len(g1))
+	}
+	want1 := []string{"c1a", "c1b", "c1c"}
+	for i := range want1 {
+		if string(g1[i].Data) != want1[i] {
+			t.Fatalf("k1 frame %d = %q, want %q", i, g1[i].Data, want1[i])
+		}
+		if i > 0 && g1[i].Time.Before(g1[i-1].Time) {
+			t.Fatalf("k1 frames not time-ordered: %v", g1)
+		}
+	}
+
+	g2 := r.FramesByConn(k2)
+	if len(g2) != 3 {
+		t.Fatalf("FramesByConn(k2) = %d frames, want 3", len(g2))
+	}
+	want2 := []string{"c2a", "c2b", "c2c"}
+	for i := range want2 {
+		if string(g2[i].Data) != want2[i] {
+			t.Fatalf("k2 frame %d = %q, want %q", i, g2[i].Data, want2[i])
+		}
+	}
+
+	if keys := r.ConnKeys(); len(keys) != 2 {
+		t.Fatalf("ConnKeys() = %v, want exactly 2 keys", keys)
+	}
+
+	// 强不变量：所有连接长度之和 == Frames()。
+	if got, want := sumConnFrames(r), r.Frames(); got != want {
+		t.Fatalf("sum(len(FramesByConn)) = %d, want Frames() = %d", got, want)
+	}
+}
+
+// TestRingConnIndexEvictionSync 守住淘汰同步：用很小的字节上限灌到触发淘汰，
+// 断言 ① 长度之和 == Frames()，② 被淘汰的帧不再出现在 FramesByConn 里。
+func TestRingConnIndexEvictionSync(t *testing.T) {
+	// 每帧 100 字节、上限 150 => 每多加一帧都会淘汰掉更老的一帧。
+	r := NewRing(RingOptions{MaxBytes: 150, Window: time.Hour})
+	base := time.Unix(1700000000, 0)
+
+	k1 := datamodel.ConnKey("10.0.0.1", 1, "10.0.0.2", 2)
+	k2 := datamodel.ConnKey("10.0.0.3", 3, "10.0.0.4", 4)
+
+	present := map[int]bool{}
+	evicted := map[int]bool{}
+
+	check := func() {
+		if got, want := sumConnFrames(r), r.Frames(); got != want {
+			t.Fatalf("invariant: sum(len(FramesByConn)) = %d, want Frames() = %d", got, want)
+		}
+		cur := map[int]bool{}
+		for _, k := range []string{k1, k2} {
+			for _, f := range r.FramesByConn(k) {
+				cur[f.No] = true
+			}
+		}
+		if len(cur) != r.Frames() {
+			t.Fatalf("indexed frames = %d, want Frames() = %d", len(cur), r.Frames())
+		}
+		for no := range present {
+			if !cur[no] {
+				evicted[no] = true
+			}
+		}
+		for no := range evicted {
+			if cur[no] {
+				t.Fatalf("evicted frame No=%d reappeared in index", no)
+			}
+		}
+		present = cur
+	}
+
+	for i := 0; i < 8; i++ {
+		data := bytes.Repeat([]byte{byte('a' + i)}, 100)
+		ts := base.Add(time.Duration(i) * time.Second)
+		if i%2 == 0 {
+			r.Add(newConnTestPacket(i, ts, "10.0.0.1", 1, "10.0.0.2", 2, data))
+		} else {
+			r.Add(newConnTestPacket(i, ts, "10.0.0.3", 3, "10.0.0.4", 4, data))
+		}
+		check()
+	}
+
+	if r.Frames() >= 8 {
+		t.Fatalf("expected evictions, Frames() = %d", r.Frames())
+	}
+	if len(evicted) == 0 {
+		t.Fatal("expected some frames to be evicted")
+	}
+}
+
+// TestRingFramesByConnReturnsCopy 验证返回的是拷贝：改动返回值不影响 ring。
+func TestRingFramesByConnReturnsCopy(t *testing.T) {
+	r := NewRing(RingOptions{MaxBytes: 1 << 20, Window: time.Hour})
+	base := time.Unix(1700000000, 0)
+	k := datamodel.ConnKey("10.0.0.1", 1, "10.0.0.2", 2)
+	r.Add(newConnTestPacket(1, base, "10.0.0.1", 1, "10.0.0.2", 2, []byte("hello")))
+
+	before := r.Frames()
+	got := r.FramesByConn(k)
+	if len(got) != 1 {
+		t.Fatalf("got %d frames, want 1", len(got))
+	}
+	// 改切片元素、改 Data 字节、追加，都不应影响 ring 内部。
+	got[0].Data[0] = 'X'
+	got[0].No = 999
+	_ = append(got, Frame{No: 12345})
+
+	if r.Frames() != before {
+		t.Fatalf("Frames() changed to %d, want %d", r.Frames(), before)
+	}
+	again := r.FramesByConn(k)
+	if len(again) != 1 {
+		t.Fatalf("second query got %d frames, want 1", len(again))
+	}
+	if string(again[0].Data) != "hello" {
+		t.Fatalf("internal data mutated: got %q, want %q", again[0].Data, "hello")
+	}
+	if again[0].No != 1 {
+		t.Fatalf("internal No mutated: got %d, want 1", again[0].No)
+	}
+}
+
+// TestRingFramesByConnNilAndEmpty 验证 nil 接收者与空键都返回 nil 且不 panic。
+func TestRingFramesByConnNilAndEmpty(t *testing.T) {
+	var nilRing *Ring
+	if got := nilRing.FramesByConn("anything"); got != nil {
+		t.Fatalf("nil Ring FramesByConn = %v, want nil", got)
+	}
+	if got := nilRing.ConnKeys(); got != nil {
+		t.Fatalf("nil Ring ConnKeys = %v, want nil", got)
+	}
+
+	r := NewRing(RingOptions{})
+	if got := r.FramesByConn(""); got != nil {
+		t.Fatalf("FramesByConn(\"\") = %v, want nil", got)
+	}
+	if got := r.FramesByConn("no-such-conn"); got != nil {
+		t.Fatalf("FramesByConn(unknown) = %v, want nil", got)
+	}
+	if got := r.ConnKeys(); got != nil {
+		t.Fatalf("empty ring ConnKeys = %v, want nil", got)
+	}
+}

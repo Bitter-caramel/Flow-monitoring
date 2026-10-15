@@ -270,6 +270,37 @@ func payloadOffset(p *datamodel.Packet, payload []byte) int {
 有了按流字节流后，证据可从"时间窗"升级为"**整条连接**"：命中的流 → 导出该流的**全部包**
 （仍从留存/环取原始帧 ✓，而不是导出重组后的字节 —— 证据要保留**原始事实** ✓）。
 
+### 8.1 落地进度与设计（11-7 拆成三步）
+
+**现状**：证据收集器（`internal/modules/collect/evidence.go`）是**时间窗**模式 ——
+告警来时开一个窗口，落盘时 `mergeFrames(ring 内存环, disk 分段留存)` 合成一个 `.pcap`。
+
+**目标**：改成"**整条连接（双向）的全部留存帧**"。三步走（每步可单独验收/提交）：
+
+| 子任务 | 内容 | 状态 |
+|---|---|---|
+| **11-7a** | `datamodel.ConnKey`（**对称**的双向连接键）+ `Ring` 的「连接 → 帧」索引（**收包即分组**） | ✅ 已落地 |
+| **11-7b** | `storage.PacketStore` 加「按四元组双向查包」+ PG 实现 + `schema.sql` 加索引 | 待做 |
+| **11-7c** | 证据组装：该连接的 **ring 帧 + 已入库包** → 按 `(captureID, No)` 从文件取回**原始帧** → `.pcap` + meta 如实标注完整性 | 待做 |
+
+**11-7a 的要点（已落地）**：
+- `ConnKey(srcIP, srcPort, dstIP, dstPort)`：每端拼 `"ip:port"`，**两端按字典序排序后拼接** ⇒
+  **交换两端得到同一个键**（对称性）。★ **不用 `StreamID`**：analyzer 只给 IPv4 分配 StreamID，
+  IPv6 恒为 -1，直接用会让所有 IPv6 连接挤成一组。
+- `Ring` 增加 `byConn` 索引 + `keys []string` 平行数组（记录每帧的连接键）；
+  `dropFrontLocked` 丢弃的是 `frames` 的**连续前缀** ⇒ 每个连接列表丢的也恰好是前缀，
+  逐帧裁队首即可 **同步**（防止索引无界泄漏）。新增 `FramesByConn`（**深拷贝**）与 `ConnKeys`（排序）。
+- ★ **强不变量测试**：`Σ len(FramesByConn(k)) == Frames()`；**变异检验**（副本里去掉淘汰同步）⇒
+  该断言立刻红（`sum = 2, want Frames() = 1`）✓ 是真守卫。
+
+**11-7b/11-7c 的两个已核实的设计约束**：
+1. ★ **不能拿 `Alert.FlowKey` 直接查库**：`storage.PacketRecord` 的 `Proto` 是**展示名**
+   （`"TLSv1.2"`/`"DNS"`…），而 `FlowKey` 结尾是传输层名（`/tcp`）⇒ 必须**按四元组双向查**
+   （IP+端口，忽略 proto），并给 `packets` 表加一个四元组索引（`CREATE INDEX IF NOT EXISTS`，纯追加）。
+2. ★ **DB 只存元数据**（`PacketRecord` 有五元组、`No`、时间等），**原始字节在 `packetstore` 的文件里**
+   （按 captureID 命名 `{id}.pcapng`）⇒ 组装证据时要做 `(captureID, No) → 文件 → 第 No 个包`，
+   才能取回**原始帧** ✓（符合"证据保留原始事实"）。
+
 ## 9. 测试策略
 
 1. ★ **自造分片夹具**：10-1 已有 pcapng 写入器 ⇒ 可程序化构造"拆包 / 乱序 / 带洞"的样本 ✓
