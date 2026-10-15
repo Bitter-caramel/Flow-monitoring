@@ -281,7 +281,23 @@ func payloadOffset(p *datamodel.Packet, payload []byte) int {
 |---|---|---|
 | **11-7a** | `datamodel.ConnKey`（**对称**的双向连接键）+ `Ring` 的「连接 → 帧」索引（**收包即分组**） | ✅ 已落地 |
 | **11-7b** | `storage.PacketStore` 加「按四元组双向查包」+ PG 实现 + `schema.sql` 加索引 | ✅ 已落地（**改为可选接口**，见下） |
-| **11-7c** | 证据组装：该连接的 **ring 帧 + 已入库包** → 按 `(captureID, No)` 从文件取回**原始帧** → `.pcap` + meta 如实标注完整性 | 待做 |
+| **11-7c-1** | 证据从「时间窗」升级为「**整条连接**」（ring 侧）：连接键进边车 + 追加该连接在环里的全部帧 + 如实标注截断 | ✅ 已落地 |
+| **11-7c-2** | 证据补齐（**库侧**）：`PacketFlowQuerier` 查包 + 按 `(captureID, No)` 从 `packetstore` 文件取回原始帧 | 待做 |
+
+**11-7c-1 的要点（已落地）**：
+- `AlertRef` 增 `ConnKey`（在 `OnAlert` 里用 `datamodel.ConnKey(四个端点)` 算 ⇒ **对称**、
+  两个方向同一键）；`evidenceWindow` 累积 `connKeys`；`EvidenceMeta` 增 `ConnKeys`。
+- `flushWindow` 在既有 disk/ring **时间窗**帧之外，**追加**这些连接在环里的**全部帧**
+  （`Ring.FramesByConn`，**不受窗口时间限制**）⇒ 证据从"告警前后 N 秒"升级为"**该连接有多少留存就取多少**"；
+  `Sources` 新增 `"ring-conn"` 以区分来源。
+- ★ **完整性如实标注**：若某连接在环里的**最早一帧落在环内可见帧的最老端**，则 `Incomplete=true`，
+  `Reason` 写明"连接 X 的更早帧不在内存环（可能已被留存窗口淘汰）"。
+  ★ 这是**推断**（`Ring` 未暴露"最老帧时间"，本包也不改它）—— 注释里写清了**推断的性质与盲区**
+  （空连接键的帧看不到），符合"宁可标不确定，也不装作完整"的原则。
+- 验证：`TestEvidenceRingConnWholeConnection` / `TestEvidenceConnKeySymmetric`（断言确切键
+  `"10.0.0.1:1111|10.0.0.2:80"`）/ `TestEvidenceConnTruncationInference`（场景 A 触发、场景 B 不触发）。
+  ★ **两次变异检验**：① 关掉"追加连接帧 + 截断推断"两块 ⇒ 三条守卫全红；
+  ② 把键改成带方向性 ⇒ 对称性守卫红（`want "10.0.0.1:1111|10.0.0.2:80"`）✓ 都是真守卫。
 
 **11-7b 的要点（已落地）**：
 - ★★ **没有把 `ListByEndpoints` 加进 `PacketStore` 接口，而是做成"可选扩展"`storage.PacketFlowQuerier`**

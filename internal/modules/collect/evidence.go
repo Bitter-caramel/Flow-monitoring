@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"flow-monitoring/internal/kernel/datamodel"
 	"flow-monitoring/internal/modules/alert"
 	"flow-monitoring/internal/modules/parse/pcapng"
 )
@@ -47,6 +48,9 @@ type AlertRef struct {
 	Time    time.Time `json:"time"`
 	PktNo   int       `json:"pkt_no"`
 	FlowKey string    `json:"flow_key"`
+	// ConnKey 是**对称的双向连接键**（datamodel.ConnKey），把同一条连接的两个方向归到一处；
+	// 证据导出靠它取回“整条连接”的帧（不依赖 IPv4 才有的 StreamID）。
+	ConnKey string `json:"conn_key,omitempty"`
 }
 
 // EvidenceMeta 是证据文件的边车（自描述）。
@@ -57,7 +61,8 @@ type EvidenceMeta struct {
 	To         time.Time  `json:"to"`
 	Packets    int        `json:"packets"`
 	Bytes      int64      `json:"bytes"`
-	Sources    []string   `json:"sources"` // 含 "disk" / "ring"
+	Sources    []string   `json:"sources"` // 含 "disk" / "ring" / "ring-conn"
+	ConnKeys   []string   `json:"conn_keys,omitempty"`
 	Incomplete bool       `json:"incomplete"`
 	Reason     string     `json:"reason,omitempty"`
 	Alerts     []AlertRef `json:"alerts"`
@@ -68,6 +73,71 @@ type evidenceWindow struct {
 	from   time.Time
 	to     time.Time
 	alerts []AlertRef
+	// connKeys 是本窗口涉及的全部连接键（对称双向）。11-7c-1 用它把证据从“窗口内的帧”
+	// 升级为“这些连接在内存环里的全部帧”。
+	connKeys map[string]struct{}
+}
+
+// addConnKey 记录本窗口涉及的连接键；空串不加入（避免脏键）。惰性建 map，兼容零值窗口。
+func (w *evidenceWindow) addConnKey(k string) {
+	if k == "" {
+		return
+	}
+	if w.connKeys == nil {
+		w.connKeys = make(map[string]struct{})
+	}
+	w.connKeys[k] = struct{}{}
+}
+
+// ringEarliestByConn 返回环里每个“有连接键的帧”的连接键 -> 该连接在环内最早帧时间。
+//
+// ★ 这是**推断**而非精确查询：Ring 未暴露“最老帧时间”，本包也不改 ring.go；这里只能遍历
+// ConnKeys 看**已建索引**（连接键非空）的帧。未建索引的帧（空键）看不到，故该结果表示
+// “已建索引帧范围内的最老时间”。宁可据此如实标注不完整，也不假装完整。
+func (e *EvidenceCollector) ringEarliestByConn() map[string]time.Time {
+	if e.ring == nil {
+		return nil
+	}
+	out := make(map[string]time.Time)
+	for _, k := range e.ring.ConnKeys() {
+		fs := e.ring.FramesByConn(k) // 已按时间升序
+		if len(fs) == 0 {
+			continue
+		}
+		out[k] = fs[0].Time
+	}
+	return out
+}
+
+// truncatedConnKeys 返回“很可能已被环淘汰掉更早帧”的连接键（有序）。
+//
+// 判据（推断）：某连接在环内最早帧 <= 环里所有连接的最早帧——即它恰好落在可见帧的最老端，
+// 说明该连接更早的帧很可能已被按容量淘汰。全局最早帧就是所有连接最早帧的最小值，故这等价于
+// “该连接包含环里可见的最老帧”。宁可标注，不装作完整。
+func truncatedConnKeys(earliestByConn map[string]time.Time, connKeys map[string]struct{}) []string {
+	if len(earliestByConn) == 0 || len(connKeys) == 0 {
+		return nil
+	}
+	var oldest time.Time
+	first := true
+	for _, t := range earliestByConn {
+		if first || t.Before(oldest) {
+			oldest = t
+			first = false
+		}
+	}
+	var out []string
+	for k := range connKeys {
+		t, ok := earliestByConn[k]
+		if !ok {
+			continue
+		}
+		if !t.After(oldest) { // t <= oldest（= 全局最早）
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // EvidenceCollector 把命中告警前后的原始帧切出来、独立另存成 pcapng + 自描述边车。
@@ -132,6 +202,8 @@ func (e *EvidenceCollector) OnAlert(ev alert.Event) {
 		Time:    t,
 		PktNo:   ev.Alert.PktNo,
 		FlowKey: ev.Alert.FlowKey,
+		// ★ 11-7c-1：用端点算对称连接键，供导出取回“整条连接”。
+		ConnKey: datamodel.ConnKey(ev.Alert.SrcIP, ev.Alert.SrcPort, ev.Alert.DstIP, ev.Alert.DstPort),
 	}
 
 	for _, w := range e.pending {
@@ -141,15 +213,18 @@ func (e *EvidenceCollector) OnAlert(ev alert.Event) {
 				w.to = to
 			}
 			w.alerts = append(w.alerts, ref)
+			w.addConnKey(ref.ConnKey)
 			return
 		}
 	}
 
-	e.pending = append(e.pending, &evidenceWindow{
+	w := &evidenceWindow{
 		from:   from,
 		to:     to,
 		alerts: []AlertRef{ref},
-	})
+	}
+	w.addConnKey(ref.ConnKey)
+	e.pending = append(e.pending, w)
 }
 
 // Tick 关掉所有"已到期"（now >= 窗口终点）的待收集窗口并落盘，返回本次新产出的证据文件路径。
@@ -231,6 +306,19 @@ func (e *EvidenceCollector) flushWindow(w *evidenceWindow) (string, error) {
 		sources = []string{"ring"}
 	}
 
+	// ★ 11-7c-1：从“时间窗”升级为“整条连接”——把这些连接在环里的**全部**帧也取回来
+	// （不受窗口时间限制）。环是按容量淘汰的，所以“环里有”就等于“内存里还留着”。
+	if e.ring != nil && len(w.connKeys) > 0 {
+		var connFrames []Frame
+		for k := range w.connKeys { // ★ 遍历 map 顺序不定 ⇒ 收集后统一排序
+			connFrames = append(connFrames, e.ring.FramesByConn(k)...)
+		}
+		if len(connFrames) > 0 {
+			frames = mergeFrames(frames, connFrames) // 复用既有去重（时间 + 字节哈希）
+			sources = append(sources, "ring-conn")   // ★ 新来源名，便于区分
+		}
+	}
+
 	// 结果按时间升序稳定排序（时间相同保持原顺序：磁盘帧在前）。
 	sort.SliceStable(frames, func(i, j int) bool {
 		return frames[i].Time.Before(frames[j].Time)
@@ -267,6 +355,24 @@ func (e *EvidenceCollector) flushWindow(w *evidenceWindow) (string, error) {
 		notes = append(notes, "达到 MaxBytes 上限，已截断")
 	}
 
+	// ★ 11-7c-1：如实标注“连接的更早帧可能已被环淘汰”。在既有 incomplete 判据之外**追加**，
+	// 不删既有判据。见 truncatedConnKeys 注释：这是**推断**（Ring 未暴露最老帧时间）。
+	if e.ring != nil && len(w.connKeys) > 0 {
+		if cut := truncatedConnKeys(e.ringEarliestByConn(), w.connKeys); len(cut) > 0 {
+			incomplete = true
+			for _, k := range cut {
+				notes = append(notes, fmt.Sprintf("连接 %s 的更早帧不在内存环（可能已被留存窗口淘汰）", k))
+			}
+		}
+	}
+
+	// 连接键（对称、有序）写进边车，便于比对与检索。
+	connKeys := make([]string, 0, len(w.connKeys))
+	for k := range w.connKeys {
+		connKeys = append(connKeys, k)
+	}
+	sort.Strings(connKeys)
+
 	meta := EvidenceMeta{
 		CaptureID:  e.capID,
 		File:       filepath.Base(pcapPath),
@@ -275,6 +381,7 @@ func (e *EvidenceCollector) flushWindow(w *evidenceWindow) (string, error) {
 		Packets:    packets,
 		Bytes:      fileBytes,
 		Sources:    sources,
+		ConnKeys:   connKeys,
 		Incomplete: incomplete,
 		Reason:     strings.Join(notes, "；"),
 		Alerts:     w.alerts,

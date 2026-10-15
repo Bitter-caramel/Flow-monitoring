@@ -360,3 +360,199 @@ func TestEvidenceFileReadable(t *testing.T) {
 		t.Fatalf("captured bytes=%d, want %d", gotBytes, wantBytes)
 	}
 }
+
+// newConnPkt 造一个带连接端点的确定性包（便于按连接键分组）。
+func newConnPkt(no int, t time.Time, size int, srcIP string, srcPort uint16, dstIP string, dstPort uint16) *datamodel.Packet {
+	p := newPkt(no, t, size)
+	p.SrcIP, p.SrcPort, p.DstIP, p.DstPort = srcIP, srcPort, dstIP, dstPort
+	return p
+}
+
+// sliceHas 判断 []string 里是否含 want。
+func sliceHas(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestEvidenceRingConnWholeConnection 守的是 11-7c-1 的新语义：
+// 证据在时间窗之外，还要带上告警连接的**整条连接**（环里全部帧），且不夹带其它连接。
+func TestEvidenceRingConnWholeConnection(t *testing.T) {
+	base := time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC)
+	ring := NewRing(RingOptions{MaxBytes: 4 << 20, Window: time.Hour})
+
+	keyA := datamodel.ConnKey("10.0.0.1", 1111, "10.0.0.2", 80)
+	// 目标连接 A：窗口外（1s / 9s）也在环里；6s 为反向，连接键仍相同。
+	aFrames := []*datamodel.Packet{
+		newConnPkt(1, base.Add(1*time.Second), 40, "10.0.0.1", 1111, "10.0.0.2", 80),
+		newConnPkt(2, base.Add(4*time.Second), 40, "10.0.0.1", 1111, "10.0.0.2", 80),
+		newConnPkt(3, base.Add(6*time.Second), 40, "10.0.0.2", 80, "10.0.0.1", 1111),
+		newConnPkt(4, base.Add(9*time.Second), 40, "10.0.0.1", 1111, "10.0.0.2", 80),
+	}
+	// 另一条连接 B：全部落在窗口 [base+3s, base+7s] 之外；只有“整条连接”逻辑才可能带入它。
+	bFrames := []*datamodel.Packet{
+		newConnPkt(5, base.Add(0*time.Second), 40, "10.9.9.9", 2222, "10.9.9.8", 443),
+		newConnPkt(6, base.Add(10*time.Second), 40, "10.9.9.9", 2222, "10.9.9.8", 443),
+	}
+	for _, p := range aFrames {
+		ring.Add(p)
+	}
+	for _, p := range bFrames {
+		ring.Add(p)
+	}
+
+	alertT := base.Add(5 * time.Second)
+	window := 2 * time.Second
+	coll := NewEvidence(EvidenceOptions{
+		Dir: filepath.Join(t.TempDir(), "evidence"), CaptureID: "cap1", LinkType: 1,
+		Window: window, MaxBytes: 1 << 20,
+	}, ring, nil)
+	coll.OnAlert(alert.Event{Alert: detect.Alert{
+		RuleID: "r1", Name: "conn", Time: alertT, PktNo: 2,
+		SrcIP: "10.0.0.1", SrcPort: 1111, DstIP: "10.0.0.2", DstPort: 80,
+	}})
+	files, err := coll.Tick(alertT.Add(window))
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("want 1 evidence file, got %d (%v)", len(files), files)
+	}
+
+	meta := loadMeta(t, files[0])
+	if len(meta.ConnKeys) != 1 || meta.ConnKeys[0] != keyA {
+		t.Fatalf("meta.ConnKeys=%v, want [%s]", meta.ConnKeys, keyA)
+	}
+	if !sliceHas(meta.Sources, "ring-conn") {
+		t.Fatalf("sources=%v, want contain ring-conn", meta.Sources)
+	}
+
+	cap, _ := parseEvidence(t, files[0])
+	if len(cap.Packets) != len(aFrames) {
+		t.Fatalf("packets=%d, want %d (whole connection A)", len(cap.Packets), len(aFrames))
+	}
+	// aFrames 已按时间升序；证据也应升序且逐帧字节一致。
+	for i := range aFrames {
+		if !bytes.Equal(cap.Packets[i].Data, aFrames[i].Data) {
+			t.Fatalf("packet %d: whole-connection frame mismatch", i)
+		}
+	}
+	// 明确断言不含连接 B 的帧。
+	for _, bf := range bFrames {
+		for _, gp := range cap.Packets {
+			if bytes.Equal(gp.Data, bf.Data) {
+				t.Fatalf("evidence must not contain connection B frame no=%d", bf.No)
+			}
+		}
+	}
+}
+
+// TestEvidenceConnKeySymmetric 守的是边车里连接信息的正确性：
+// 同一连接的两个方向得到**同一个** ConnKey；ConnKeys 只含该连接；Sources 含 ring-conn。
+func TestEvidenceConnKeySymmetric(t *testing.T) {
+	base := time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC)
+	ring := NewRing(RingOptions{MaxBytes: 4 << 20, Window: time.Hour})
+	ring.Add(newConnPkt(1, base.Add(4*time.Second), 40, "10.0.0.1", 1111, "10.0.0.2", 80))
+	ring.Add(newConnPkt(2, base.Add(6*time.Second), 40, "10.0.0.2", 80, "10.0.0.1", 1111))
+
+	wantKey := datamodel.ConnKey("10.0.0.1", 1111, "10.0.0.2", 80)
+	coll := NewEvidence(EvidenceOptions{
+		Dir: filepath.Join(t.TempDir(), "evidence"), CaptureID: "cap1", LinkType: 1,
+		Window: 2 * time.Second, MaxBytes: 1 << 20,
+	}, ring, nil)
+	// 两个方向、同一时刻：窗口重叠 -> 合并到同一窗口。
+	coll.OnAlert(alert.Event{Alert: detect.Alert{
+		RuleID: "a", Name: "fwd", Time: base.Add(5 * time.Second), PktNo: 1,
+		SrcIP: "10.0.0.1", SrcPort: 1111, DstIP: "10.0.0.2", DstPort: 80,
+	}})
+	coll.OnAlert(alert.Event{Alert: detect.Alert{
+		RuleID: "b", Name: "rev", Time: base.Add(5 * time.Second), PktNo: 2,
+		SrcIP: "10.0.0.2", SrcPort: 80, DstIP: "10.0.0.1", DstPort: 1111,
+	}})
+	files, err := coll.Tick(base.Add(7 * time.Second))
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("overlapping alerts should merge to 1 file, got %d (%v)", len(files), files)
+	}
+	meta := loadMeta(t, files[0])
+	if len(meta.Alerts) != 2 {
+		t.Fatalf("meta.Alerts=%d, want 2", len(meta.Alerts))
+	}
+	for i, a := range meta.Alerts {
+		if a.ConnKey == "" {
+			t.Fatalf("alert %d ConnKey empty", i)
+		}
+		if a.ConnKey != wantKey {
+			t.Fatalf("alert %d ConnKey=%q, want %q", i, a.ConnKey, wantKey)
+		}
+	}
+	if meta.Alerts[0].ConnKey != meta.Alerts[1].ConnKey {
+		t.Fatalf("两个方向的 ConnKey 不一致: %q vs %q", meta.Alerts[0].ConnKey, meta.Alerts[1].ConnKey)
+	}
+	if len(meta.ConnKeys) != 1 || meta.ConnKeys[0] != wantKey {
+		t.Fatalf("meta.ConnKeys=%v, want [%s]", meta.ConnKeys, wantKey)
+	}
+	if !sliceHas(meta.Sources, "ring-conn") {
+		t.Fatalf("sources=%v, want contain ring-conn", meta.Sources)
+	}
+}
+
+// TestEvidenceConnTruncationInference 守的是“如实标注完整性”：
+// 目标连接最早帧恰是环里最老帧 -> Incomplete=true 且 Reason 含该连接键；
+// 环里还有更早的其它连接帧 -> 不触发该 Reason。
+func TestEvidenceConnTruncationInference(t *testing.T) {
+	base := time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC)
+	keyA := datamodel.ConnKey("10.0.0.1", 1111, "10.0.0.2", 80)
+
+	run := func(t *testing.T, withEarlierOther bool) EvidenceMeta {
+		t.Helper()
+		ring := NewRing(RingOptions{MaxBytes: 4 << 20, Window: time.Hour})
+		// A 连接：环内最早帧在 base+1s。
+		ring.Add(newConnPkt(1, base.Add(1*time.Second), 40, "10.0.0.1", 1111, "10.0.0.2", 80))
+		ring.Add(newConnPkt(2, base.Add(4*time.Second), 40, "10.0.0.1", 1111, "10.0.0.2", 80))
+		ring.Add(newConnPkt(3, base.Add(6*time.Second), 40, "10.0.0.1", 1111, "10.0.0.2", 80))
+		if withEarlierOther {
+			// 另一条连接 C：更早（base+0s）=> 环里可见的最老帧不再是 A 的。
+			ring.Add(newConnPkt(9, base.Add(0*time.Second), 40, "10.9.9.9", 2222, "10.9.9.8", 443))
+		}
+		coll := NewEvidence(EvidenceOptions{
+			Dir: filepath.Join(t.TempDir(), "evidence"), CaptureID: "cap1", LinkType: 1,
+			Window: 2 * time.Second, MaxBytes: 1 << 20,
+		}, ring, nil)
+		coll.OnAlert(alert.Event{Alert: detect.Alert{
+			RuleID: "r1", Name: "conn", Time: base.Add(5 * time.Second), PktNo: 2,
+			SrcIP: "10.0.0.1", SrcPort: 1111, DstIP: "10.0.0.2", DstPort: 80,
+		}})
+		files, err := coll.Tick(base.Add(7 * time.Second))
+		if err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+		if len(files) != 1 {
+			t.Fatalf("want 1 file, got %d", len(files))
+		}
+		return loadMeta(t, files[0])
+	}
+
+	// A. 目标连接最早帧 == 环里最老帧 => 标注可能被截断。
+	metaA := run(t, false)
+	if !metaA.Incomplete {
+		t.Fatalf("scenario A: Incomplete=false, want true")
+	}
+	if !strings.Contains(metaA.Reason, keyA) {
+		t.Fatalf("scenario A: Reason=%q, want contain conn key %q", metaA.Reason, keyA)
+	}
+	if !strings.Contains(metaA.Reason, "更早帧不在内存环") {
+		t.Fatalf("scenario A: Reason=%q, want explain truncation", metaA.Reason)
+	}
+
+	// B. 环里还有更早的其它连接帧 => 不触发该 Reason。
+	metaB := run(t, true)
+	if strings.Contains(metaB.Reason, keyA) {
+		t.Fatalf("scenario B: Reason=%q must NOT blame conn key %q", metaB.Reason, keyA)
+	}
+}
