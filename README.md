@@ -48,8 +48,9 @@
 ## 三、快速开始
 
 ```bash
-# 构建全部模块进程到 bin/plugins/
-bash scripts/build-plugins.sh
+# 构建模块进程到 bin/plugins/（清单驱动，可裁剪）
+bash scripts/build-modules.sh        # 全部；也支持 --core-only / --modules=alert / --list
+bash scripts/build-plugins.sh        # 兼容入口，等于 build-modules.sh --all
 
 # 启动宿主（默认 :18080，读 registry/backend-modules/*.json）
 go run ./cmd/server

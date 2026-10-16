@@ -1,32 +1,21 @@
 #!/usr/bin/env bash
-# 一键构建全部「模块进程」二进制到 bin/plugins/。
+# 兼容入口：等价于 scripts/build-modules.sh --all。
 #
-# 模块二进制命名必须与 registry/backend-modules/*.json 里的 "binary" 字段一致
-# （默认等于模块短名，如 query.json -> bin/plugins/query[.exe]）。
+# 历史说明：本脚本原先直接扫描 cmd/plugins/*/ 目录构建，**不读模块清单**，
+# 因此无法裁剪（不能只构建 core、也不能"某模块 + 它依赖的模块"），
+# 也看不懂 provides/injects 依赖关系。裁剪能力现已收进
+# internal/buildplan + cmd/fmbuild（唯一实现），本脚本保留仅为不破坏
+# 既有引用（README、docs、cmd/plugins/*/main.go 注释）。
 #
 # 用法：
-#   scripts/build-plugins.sh              # 构建全部
+#   scripts/build-plugins.sh              # 构建全部（等于 scripts/build-modules.sh --all）
 #   FLOW_PLUGIN_DIR=out/plugins scripts/build-plugins.sh
+#
+# 需要裁剪请直接用：scripts/build-modules.sh --core-only | --modules=<id> | --list
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OUT="${FLOW_PLUGIN_DIR:-bin/plugins}"
-EXT=""
-if [ "$(go env GOOS)" = "windows" ]; then EXT=".exe"; fi
-
-mkdir -p "$OUT"
-
-shopt -s nullglob
-found=0
-for src in cmd/plugins/*/; do
-  name="$(basename "$src")"
-  echo "building module process: $name -> $OUT/$name$EXT"
-  go build -o "$OUT/$name$EXT" "./$src"
-  found=$((found + 1))
-done
-
-if [ "$found" -eq 0 ]; then
-  echo "no module process found under cmd/plugins/ (add cmd/plugins/<name>/main.go)" >&2
-  exit 1
-fi
-echo "built $found module process(es) -> $OUT"
+# 无参数时补 --all（保持"裸跑=构建全部"的旧语义）；带参数则原样透传，
+# 这样 `scripts/build-plugins.sh --core-only` 之类的用法不会被硬塞的 --all 撞成"模式互斥"。
+if [ $# -eq 0 ]; then set -- --all; fi
+exec "$(dirname "$0")/build-modules.sh" "$@"
