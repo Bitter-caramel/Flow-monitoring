@@ -91,6 +91,10 @@ func Default() *Config {
 		DataDir:     "data",
 		PluginDir:   "bin/plugins",
 		ManifestDir: "registry/backend-modules",
+		// ★ 前端构建产物目录（相对启动目录）：缺省托管 frontend/dist，
+		//   目录不存在时 http.FileServer 自然返回 404，不影响任何后端接口；
+		//   显式设为空字符串（FLOW_STATIC_DIR= ）= 纯 API 部署、不托管静态资源。
+		StaticDir: "frontend/dist",
 	}
 }
 
@@ -124,6 +128,7 @@ func Load(path string) (*Config, error) {
 //   - FLOW_HTTP_ADDR: HTTP 监听地址
 //   - FLOW_LOG_LEVEL: 日志级别
 //   - FLOW_DEBUG: "1"/"true" 开启 Debug
+//   - FLOW_STATIC_DIR: 前端构建产物目录（★ 显式设为空串 = 不托管静态资源）
 func applyEnv(c *Config) *Config {
 	if v := os.Getenv("FLOW_DB_DSN"); v != "" {
 		c.Database.DSN = v
@@ -133,6 +138,10 @@ func applyEnv(c *Config) *Config {
 	}
 	if v := os.Getenv("FLOW_LOG_LEVEL"); v != "" {
 		c.Logging.Level = v
+	}
+	// 用 LookupEnv：允许"显式设为空"来表达"不要托管前端"
+	if v, ok := os.LookupEnv("FLOW_STATIC_DIR"); ok {
+		c.StaticDir = v
 	}
 	switch os.Getenv("FLOW_DEBUG") {
 	case "1", "true", "TRUE", "True":
