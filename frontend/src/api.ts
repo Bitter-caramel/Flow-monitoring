@@ -68,3 +68,72 @@ export async function listPackets(
   if (!resp.ok) throw new Error(await resp.text())
   return resp.json()
 }
+
+/**
+ * 模块控制面视图（GET /api/modules 数组元素）。
+ * 字段对齐后端 internal/kernel/modulecontrol.ModuleView 的 JSON tag，
+ * 前端只声明自己会用的字段（多出来的字段忽略即可）。
+ */
+export interface ModuleView {
+  id: string
+  name: string
+  version: string
+  layer: string
+  core: boolean
+  enabled: boolean
+  /** 运行态：后端 12-3 起可能为 "unknown"/其他值，这里只透传。 */
+  state?: string
+}
+
+/** 自检发现（对齐后端 registry.Issue）。 */
+export interface SelfCheckIssue {
+  code: string
+  module_id?: string
+  message: string
+}
+
+/**
+ * 自检报告（GET /api/modules/selfcheck）。
+ * 对齐后端 registry.SelfCheckReport：ok == len(errors)==0；errors/warnings 为空时字段缺省。
+ */
+export interface SelfCheckReport {
+  ok: boolean
+  errors?: SelfCheckIssue[]
+  warnings?: SelfCheckIssue[]
+  core: string[]
+  enabled: string[]
+}
+
+/**
+ * 带超时的 JSON GET。
+ *
+ * ★ 与面板用的原语保持一致（不引第三方请求库）：仍是原生 fetch。
+ * 超时用 AbortController 触发（默认 3s），超时/网络错误/非 2xx 一律抛 Error，
+ * 由调用方决定如何呈现（状态栏据此显示"后端未连接"），绝不产生未捕获的 rejection。
+ */
+async function getJSON<T>(path: string, timeoutMs = 3000): Promise<T> {
+  const ctrl = new AbortController()
+  const timer = window.setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    const resp = await fetch(path, {
+      signal: ctrl.signal,
+      headers: { Accept: 'application/json' },
+    })
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status} ${resp.statusText}`)
+    }
+    return (await resp.json()) as T
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+/** 列出后端模块（GET /api/modules）。 */
+export function listModules(timeoutMs = 3000): Promise<ModuleView[]> {
+  return getJSON<ModuleView[]>('/api/modules', timeoutMs)
+}
+
+/** 读取后端自检报告（GET /api/modules/selfcheck）。 */
+export function getSelfCheck(timeoutMs = 3000): Promise<SelfCheckReport> {
+  return getJSON<SelfCheckReport>('/api/modules/selfcheck', timeoutMs)
+}

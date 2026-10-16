@@ -1,55 +1,58 @@
+/**
+ * Shell 外壳 —— 设计文档 §4 的四区骨架。
+ *
+ *   ┌───────────────────────────────────────────────┐
+ *   │ 顶栏 TopBar                                     │  ← 产品名 / 搜索 / 主题 / 密度 / 连接
+ *   ├──────────┬────────────────────────────────────┤
+ *   │ 左导航    │ 工作区（面板挂载点，独立滚动）        │
+ *   │ LayerNav  │                                     │
+ *   │ (按层分组) │                                     │
+ *   ├──────────┴────────────────────────────────────┤
+ *   │ 状态栏 StatusBar                                │  ← 模块数/启用数 · 自检 · 刷新
+ *   └───────────────────────────────────────────────┘
+ *
+ * 只做三件事：
+ *   1. 读注册表，交给 LayerNav 渲染分层导航；
+ *   2. 在工作区挂载选中的面板组件（shell 不感知其实现）；
+ *   3. 持有一个 useAppStatus，把连接状态分发给 TopBar / StatusBar（单一数据源）。
+ *
+ * 整体高度撑满（h-screen + flex-col），仅工作区 overflow-auto ⇒ 顶栏/导航/状态栏固定。
+ */
 import { useState } from 'react'
 import { panelRegistry } from './registry'
 import type { PanelPlugin } from './registry'
+import { LayerNav } from './LayerNav'
+import { TopBar } from './TopBar'
+import { StatusBar } from './StatusBar'
+import { useAppStatus } from './useAppStatus'
 
-/**
- * Shell 外壳。
- *
- * 只做两件事：
- *   1. 读面板注册表，渲染导航（面板列表）
- *   2. 在容器区挂载选中的面板组件
- *
- * shell 不感知具体面板实现 —— 新增/替换面板只需注册，无需改 shell。
- */
 export function App() {
   const panels = panelRegistry.list()
-  const [activeId, setActiveId] = useState<string>(panels[0]?.manifest.id ?? '')
+  const [activeId, setActiveId] = useState<string>(() => panels[0]?.manifest.id ?? '')
+
+  // 全局状态只请求一次，顶栏与状态栏共用（避免重复打后端）。
+  const status = useAppStatus()
 
   const active: PanelPlugin | undefined = panelRegistry.query(activeId)
   const ActiveComponent = active?.component
 
   return (
-    <div className="flex h-screen overflow-hidden bg-app text-fg">
-      <aside className="flex w-[220px] min-w-[220px] flex-col border-r border-subtle bg-panel">
-        <div className="border-b border-subtle px-4 py-3 text-lg font-semibold">流量分析平台</div>
-        <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-2">
-          {panels.map((p) => (
-            <button
-              key={p.manifest.id}
-              className={`flex items-center gap-2 rounded-xs px-2.5 py-2 text-left text-base ${
-                p.manifest.id === activeId ? 'bg-accent text-accent-fg' : 'hover:bg-elevated'
-              }`}
-              onClick={() => setActiveId(p.manifest.id)}
-              title={p.manifest.description}
-            >
-              <span className="w-[18px] text-center">{p.manifest.icon ?? '▫'}</span>
-              <span className="flex-1">{p.manifest.name}</span>
-              <span className={`text-xs ${p.manifest.id === activeId ? 'text-accent-fg/70' : 'text-dim'}`}>
-                v{p.manifest.version}
-              </span>
-            </button>
-          ))}
-        </nav>
-        <div className="border-t border-subtle px-3 py-2 text-xs text-dim">{panels.length} 个面板已注册</div>
-      </aside>
+    <div className="flex h-screen flex-col overflow-hidden bg-app text-fg">
+      <TopBar connection={status.state} />
 
-      <main className="flex-1 overflow-auto p-4">
-        {ActiveComponent ? (
-          <ActiveComponent />
-        ) : (
-          <div className="flex h-full items-center justify-center text-dim">请注册至少一个面板</div>
-        )}
-      </main>
+      <div className="flex min-h-0 flex-1">
+        <LayerNav activeId={activeId} onSelect={setActiveId} />
+
+        <main className="min-w-0 flex-1 overflow-auto p-4">
+          {ActiveComponent ? (
+            <ActiveComponent />
+          ) : (
+            <div className="flex h-full items-center justify-center text-dim">请注册至少一个面板</div>
+          )}
+        </main>
+      </div>
+
+      <StatusBar status={status} />
     </div>
   )
 }
