@@ -1,6 +1,12 @@
-﻿* text=auto
+* text=auto
 *.go text eol=lf
 *.mod text eol=lf
 *.sum text eol=lf
+# shell 脚本必须恒为 LF：本机 core.autocrlf=true，若不锁定，Windows 检出会变 CRLF，
+# 而 CRLF 的 .sh 在 Linux / WSL 里会直接报 "invalid option name" 之类错误（脚本形同报废）。
+*.sh text eol=lf
+# PowerShell 脚本含中文，必须带 UTF-8 BOM（PS 5.1 对无 BOM 脚本按 ANSI 解码会报语法错）。
+# BOM 由文件内容携带，git 不会增删；此处只声明文本属性，避免二进制误判。
+*.ps1 text
 internal/modules/rule/pipeline/testdata/** text eol=lf
 internal/hotpath/testdata/** text eol=lf

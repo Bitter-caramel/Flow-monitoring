@@ -38,3 +38,6 @@ config.local.yaml
 config.local.json
 .env
 .env.local
+
+# Agent 临时产物（trae 任务书与轨迹：仅本地审计用，不入库）
+.trae-*
