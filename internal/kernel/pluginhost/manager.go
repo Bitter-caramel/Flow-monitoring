@@ -320,8 +320,14 @@ func (m *Manager) StartOne(_ context.Context, desc registry.Descriptor) error {
 		return nil // 幂等
 	}
 	if ok && st == stateError {
-		// 上次 Start 失败：进程还在（launched），允许重试。
+		// 上次 Start 失败：进程可能还在（launched），允许重试。
 		st = stateLaunched
+	}
+	// ★ 真实进程验证抓到的 bug（2026-10-16）：StopOne 里的 client.Kill() 会**销毁 RPC 连接**，
+	// 旧 Process 的 Module 代理从此不可用（Start() 只会报 "connection is shut down"）。
+	// ⇒ stopped/error 之后要重启，**必须重新 Launch**（新进程 + 新握手 + 新代理）。
+	if ok && st == stateStopped {
+		ok, p = false, nil
 	}
 	if !ok || p == nil {
 		if err := m.Launch(desc); err != nil {
@@ -342,6 +348,23 @@ func (m *Manager) StartOne(_ context.Context, desc registry.Descriptor) error {
 		return fmt.Errorf("pluginhost: start %s: %w", desc.ID, err)
 	}
 	m.setState(desc.ID, stateStarted)
+	m.rememberOrder(desc.ID)
 	m.logger.Info("module started", "id", desc.ID)
 	return nil
+}
+
+// rememberOrder 把模块 id 记进 m.order（若尚未在册）。
+//
+// ★ 真实进程验证抓到的缺口（2026-10-16）：m.order 原先只由 StartAll 填充，
+// 于是"用 StartOne 单独启起来的模块"在 StopAll 时**收不掉**（残留进程 ⇒ Windows 下
+// 连临时目录都删不掉）。这里补上，保持 order 仍是拓扑序的一部分、StopAll 依旧逆序关闭。
+func (m *Manager) rememberOrder(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, x := range m.order {
+		if x == id {
+			return
+		}
+	}
+	m.order = append(m.order, id)
 }
