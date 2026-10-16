@@ -23,6 +23,7 @@ import (
 	"flow-monitoring/internal/kernel/eventbus"
 	"flow-monitoring/internal/kernel/health"
 	"flow-monitoring/internal/kernel/logging"
+	"flow-monitoring/internal/kernel/modulecontrol"
 	"flow-monitoring/internal/kernel/pluginhost"
 	"flow-monitoring/internal/kernel/registry"
 	"flow-monitoring/internal/kernel/storage"
@@ -117,6 +118,15 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 		h.Handler().ServeHTTP(w, r)
 	})
 	ts.SetStaticDir(cfg.StaticDir)
+
+	// 控制面：唯一行为实现（modulecontrol）+ 运行期后端（pluginhost，StopTimeout<=0 用默认值）。
+	// 此时 reg 与 mgr 均已建好（mgr 在上方 Start、reg 在清单加载处），故在此注入。
+	mctl, err := modulecontrol.New(modulecontrol.Options{ManifestDir: cfg.ManifestDir, Logger: logger})
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap: module control: %w", err)
+	}
+	mctl = mctl.WithRuntime(pluginhost.NewRuntimeBackend(mgr, reg, 0))
+	transport.RegisterModulesAPI(ts, mctl)
 
 	return &App{
 		Cfg:       cfg,
