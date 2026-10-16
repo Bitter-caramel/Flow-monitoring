@@ -45,10 +45,10 @@ export function CaptureImportPanel() {
   }
 
   return (
-    <div className="panel">
-      <div className="panel-header">
-        <h2 className="panel-title">抓包导入</h2>
-        <span className="panel-subtitle">上传 pcap/pcapng 文件，解析后入库</span>
+    <div className="flex flex-col gap-3">
+      <div className="flex items-baseline gap-2">
+        <h2 className="text-lg font-semibold">抓包导入</h2>
+        <span className="text-sm text-dim">上传 pcap/pcapng 文件，解析后入库</span>
       </div>
 
       <div>
@@ -57,13 +57,14 @@ export function CaptureImportPanel() {
           accept=".pcap,.pcapng,.cap"
           onChange={onFileChange}
           disabled={loading}
+          className="text-base text-fg file:mr-3 file:cursor-pointer file:rounded-sm file:border file:border-subtle file:bg-elevated file:px-3 file:py-1 file:text-base file:text-fg"
         />
-        {loading && <span className="info"> 上传解析中…</span>}
+        {loading && <span className="text-base text-dim"> 上传解析中…</span>}
       </div>
 
-      {error && <div className="error">{error}</div>}
+      {error && <div className="sev-danger">{error}</div>}
 
-      <div className="table-wrap">
+      <div className="panel-surface overflow-auto">
         <table>
           <thead>
             <tr>
@@ -78,7 +79,7 @@ export function CaptureImportPanel() {
           <tbody>
             {captures.length === 0 ? (
               <tr>
-                <td colSpan={6} className="info">
+                <td colSpan={6} className="text-dim">
                   暂无 capture，请上传文件
                 </td>
               </tr>

@@ -1,0 +1,32 @@
+/*
+ * 令牌第 3 层：密度（density tokens）
+ * =====================================================================
+ * [data-density='compact']（默认）/ 'normal' / 'comfortable' 覆盖同一批
+ * 行高与内边距变量；base.css 的表格/列表消费这些变量，因此切换密度时
+ * 表格与列表行高随之变化。切换 = 改 documentElement.dataset.density。
+ */
+
+:root,
+[data-density='compact'] {
+  --row-h: 24px;
+  --pad-x: 8px;
+  --pad-y: 3px;
+  --gap: 8px;
+  --line-h: 1.4;
+}
+
+[data-density='normal'] {
+  --row-h: 30px;
+  --pad-x: 10px;
+  --pad-y: 5px;
+  --gap: 10px;
+  --line-h: 1.5;
+}
+
+[data-density='comfortable'] {
+  --row-h: 38px;
+  --pad-x: 14px;
+  --pad-y: 8px;
+  --gap: 16px;
+  --line-h: 1.6;
+}

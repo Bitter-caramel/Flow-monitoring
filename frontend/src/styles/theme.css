@@ -1,0 +1,128 @@
+/*
+ * 令牌第 2 层：语义令牌（semantic tokens）
+ * =====================================================================
+ * :root 默认深色；[data-theme='light'] 覆盖“同一批变量”。
+ * ★ 组件只允许引用本层变量（或由本层映射出的 Tailwind 工具类）。
+ * ★ 本文件不写死任何原始色值：一律 var(--color-…) 取自 tokens.css。
+ * ★ 主题切换 = 改 documentElement.dataset.theme ⇒ 运行时生效、零重渲染。
+ */
+
+:root,
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* 背景层次（靠底色差 + 边框，不用阴影） */
+  --bg-app: var(--color-ink-900);
+  --bg-panel: var(--color-ink-800);
+  --bg-elevated: var(--color-ink-750);
+
+  /* 边框层次 */
+  --border-subtle: var(--color-ink-600);
+  --border-strong: var(--color-ink-500);
+
+  /* 前景层次 */
+  --fg: var(--color-ink-100);
+  --fg-muted: var(--color-ink-300);
+  --fg-dim: var(--color-ink-400);
+
+  /* 品牌与状态 */
+  --accent: var(--color-blue-500);
+  --accent-fg: var(--color-white);
+  --danger: var(--color-red-400);
+  --warn: var(--color-amber-400);
+  --ok: var(--color-teal-400);
+  --link: var(--color-blue-400);
+
+  /* 语义色底（由语义色派生，供 .sev-* / 告警条复用；不写死） */
+  --sev-danger-bg: color-mix(in srgb, var(--danger) 14%, transparent);
+  --sev-warn-bg: color-mix(in srgb, var(--warn) 14%, transparent);
+  --sev-ok-bg: color-mix(in srgb, var(--ok) 14%, transparent);
+  --sev-info-bg: color-mix(in srgb, var(--link) 12%, transparent);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg-app: var(--color-ink-050);
+  --bg-panel: var(--color-white);
+  --bg-elevated: var(--color-ink-050);
+
+  --border-subtle: var(--color-ink-100);
+  --border-strong: var(--color-ink-200);
+
+  --fg: var(--color-ink-750);
+  --fg-muted: var(--color-ink-400);
+  --fg-dim: var(--color-ink-300);
+
+  --accent: var(--color-blue-600);
+  --accent-fg: var(--color-white);
+  --danger: var(--color-red-500);
+  --warn: var(--color-amber-600);
+  --ok: var(--color-teal-600);
+  --link: var(--color-blue-600);
+}
+
+/*
+ * ★ 语义色不能只靠颜色区分（色盲安全）。
+ * .sev-* 用“三要素”组合表达严重度：底色 + 左边框 + 小符号位（::before）。
+ * 攻击/命中=暖红，可疑=琥珀，正常=青绿，信息=蓝灰。
+ */
+.sev-danger,
+.sev-warn,
+.sev-ok,
+.sev-info {
+  padding: 6px var(--pad-x, 8px);
+  border-left: 3px solid transparent;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: transparent;
+  color: var(--fg);
+}
+
+.sev-danger::before,
+.sev-warn::before,
+.sev-ok::before,
+.sev-info::before {
+  display: inline-block;
+  width: 1em;
+  margin-right: 4px;
+  font-weight: 700;
+  text-align: center;
+  font-family: var(--font-mono);
+}
+
+.sev-danger {
+  background: var(--sev-danger-bg);
+  border-left-color: var(--danger);
+}
+.sev-danger::before {
+  content: '▲';
+  color: var(--danger);
+}
+
+.sev-warn {
+  background: var(--sev-warn-bg);
+  border-left-color: var(--warn);
+}
+.sev-warn::before {
+  content: '◆';
+  color: var(--warn);
+}
+
+.sev-ok {
+  background: var(--sev-ok-bg);
+  border-left-color: var(--ok);
+}
+.sev-ok::before {
+  content: '●';
+  color: var(--ok);
+}
+
+.sev-info {
+  background: var(--sev-info-bg);
+  border-left-color: var(--link);
+}
+.sev-info::before {
+  content: 'i';
+  color: var(--link);
+  font-style: italic;
+}

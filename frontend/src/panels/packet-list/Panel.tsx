@@ -47,10 +47,10 @@ export function PacketListPanel() {
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1
 
   return (
-    <div className="panel">
-      <div className="panel-header">
-        <h2 className="panel-title">包列表</h2>
-        <span className="panel-subtitle">
+    <div className="flex flex-col gap-3">
+      <div className="flex items-baseline gap-2">
+        <h2 className="text-lg font-semibold">包列表</h2>
+        <span className="text-sm text-dim">
           共 {total} 包 · 第 {currentPage}/{totalPages} 页
         </span>
       </div>
@@ -62,7 +62,7 @@ export function PacketListPanel() {
             setCaptureId(e.target.value)
             setOffset(0)
           }}
-          style={{ padding: '6px 10px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)' }}
+          className="rounded-sm border border-subtle bg-app px-2.5 py-1.5 text-base text-fg"
         >
           {captures.length === 0 && <option value="">暂无 capture</option>}
           {captures.map((c) => (
@@ -73,9 +73,9 @@ export function PacketListPanel() {
         </select>
       </div>
 
-      {error && <div className="error">{error}</div>}
+      {error && <div className="sev-danger">{error}</div>}
 
-      <div className="table-wrap">
+      <div className="panel-surface overflow-auto">
         <table>
           <thead>
             <tr>
@@ -91,7 +91,7 @@ export function PacketListPanel() {
           <tbody>
             {packets.length === 0 ? (
               <tr>
-                <td colSpan={7} className="info">
+                <td colSpan={7} className="text-dim">
                   无数据
                 </td>
               </tr>
@@ -104,7 +104,7 @@ export function PacketListPanel() {
                   <td className="mono">{formatEndpoint(p.dst_ip, p.dst_port)}</td>
                   <td>{p.proto}</td>
                   <td className="mono">{p.cap_len}</td>
-                  <td className="mono" style={{ whiteSpace: 'normal' }}>{p.info}</td>
+                  <td className="mono whitespace-normal">{p.info}</td>
                 </tr>
               ))
             )}
@@ -112,11 +112,19 @@ export function PacketListPanel() {
         </table>
       </div>
 
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-        <button className="btn" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>
+      <div className="flex items-center gap-2">
+        <button
+          className="rounded-sm bg-accent px-3 py-1.5 text-base text-accent-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={offset === 0}
+          onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+        >
           上一页
         </button>
-        <button className="btn" disabled={offset + PAGE_SIZE >= total} onClick={() => setOffset(offset + PAGE_SIZE)}>
+        <button
+          className="rounded-sm bg-accent px-3 py-1.5 text-base text-accent-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={offset + PAGE_SIZE >= total}
+          onClick={() => setOffset(offset + PAGE_SIZE)}
+        >
           下一页
         </button>
       </div>

@@ -1,6 +1,10 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import './styles.css'
+// 令牌三层 + 基础层（顺序固定：tokens → theme → density → base）
+import './styles/tokens.css'
+import './styles/theme.css'
+import './styles/density.css'
+import './styles/base.css'
 import { App } from './shell/App'
 
 // 导入面板模块 → 触发各自的自注册（registerPanel）

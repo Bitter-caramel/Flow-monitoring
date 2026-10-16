@@ -1,0 +1,126 @@
+/*
+ * 令牌第 4 层：基础层（base）
+ * =====================================================================
+ * reset / 深色滚动条 / color-scheme / 数据类工具 / 通用面板容器类。
+ * 取值全部来自语义令牌（theme.css）与密度令牌（density.css），不写死色值。
+ */
+
+/* ── reset ─────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+html,
+body,
+h1,
+h2,
+h3,
+h4,
+p,
+figure,
+blockquote,
+dl,
+dd,
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--bg-app);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--line-h);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ── 深色滚动条 ────────────────────────────────────────────────── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  background-color: var(--border-strong);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--fg-dim);
+}
+
+/* ── 数据类工具（IP / 端口 / 时间 / 字节：等宽 + 表格数字）────── */
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 通用面板容器：小圆角 + 边框层次（层次靠边框与底色差，无阴影）── */
+.panel-surface {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+/* ── 数据表格（元素级）：行高/内边距跟随密度令牌 ───────────────── */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-base);
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: var(--row-h);
+  padding: var(--pad-y) var(--pad-x);
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-strong);
+  text-align: left;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+tbody td {
+  height: var(--row-h);
+  padding: var(--pad-y) var(--pad-x);
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+tbody tr:hover {
+  background: var(--bg-elevated);
+}

@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+/*
+ * 令牌第 1 层：原始令牌（raw / primitive tokens）
+ * =====================================================================
+ * ★ 全项目唯一允许出现“原始色值”的文件。
+ *   组件与 theme.css 只能通过 var(--color-…) / 语义令牌引用，不得写死。
+ * ★ Tailwind v4 是 CSS-first：原始令牌直接在 @theme 里声明，
+ *   不建 tailwind.config.js（本项目没有、也不要建）。
+ *
+ * 命名：--color-<家族>-<档位>（颜色）/ --text-<档>（字号）/
+ *       --spacing（4px 基线）/ --radius-<档>（2~4px）/ --font-<族>（字体栈）。
+ */
+@theme {
+  /* ── 字体栈 ─────────────────────────────────────────────── */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  --font-mono: ui-monospace, 'JetBrains Mono', 'Cascadia Mono', monospace;
+
+  /* ── 字号（分析控制台：小字号、高密度）─────────────────── */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+
+  /* ── 间距基线：4px（gap-1 = 4px、px-3 = 12px、p-4 = 16px …）── */
+  --spacing: 4px;
+
+  /* ── 圆角：2~4px（禁用大圆角）──────────────────────────── */
+  --radius-xs: 2px;
+  --radius-sm: 3px;
+  --radius-md: 4px;
+
+  /* ── 原始色板：冷调蓝灰（深色基底）─────────────────────── */
+  --color-white: #ffffff;
+  --color-ink-950: #0b0f14;
+  --color-ink-900: #0f1419;
+  --color-ink-850: #131a22;
+  --color-ink-800: #161b22;
+  --color-ink-750: #1c232c;
+  --color-ink-700: #232b34;
+  --color-ink-600: #2a3138;
+  --color-ink-500: #3a444f;
+  --color-ink-400: #55606b;
+  --color-ink-300: #8a949c;
+  --color-ink-200: #b6bec6;
+  --color-ink-100: #d6dbe0;
+  --color-ink-050: #eef1f4;
+
+  /* ── 原始色板：安全域语义色 ────────────────────────────── */
+  /* 攻击 / 命中 = 暖红 */
+  --color-red-300: #fca5a5;
+  --color-red-400: #f0574f;
+  --color-red-500: #dc2626;
+  /* 可疑 = 琥珀 */
+  --color-amber-400: #f0a132;
+  --color-amber-600: #b26a00;
+  /* 正常 = 青绿 */
+  --color-teal-400: #22b8a6;
+  --color-teal-600: #0f8a7a;
+  /* 信息 = 蓝灰 */
+  --color-slate-400: #8a94a6;
+  --color-slate-600: #5b6577;
+  /* 品牌 / 链接 = 蓝 */
+  --color-blue-400: #60a5fa;
+  --color-blue-500: #3b82f6;
+  --color-blue-600: #2563eb;
+}
+
+/*
+ * 语义令牌 → Tailwind 工具类映射（bridge）。
+ * =====================================================================
+ * ★ 必须放在本文件：Tailwind v4 的工具类是在 `@import "tailwindcss";`
+ *   所在的 CSS 文件里生成的；放在 theme.css 里的 @theme 不会参与工具类生成。
+ * @theme inline 让工具类直接内联语义变量（如 .bg-panel → background-color:
+ * var(--bg-panel)），因此 data-theme 切换时工具类跟随变化。
+ * 语义变量本体在 theme.css 中定义。
+ */
+@theme inline {
+  --color-app: var(--bg-app);
+  --color-panel: var(--bg-panel);
+  --color-elevated: var(--bg-elevated);
+  --color-subtle: var(--border-subtle);
+  --color-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-muted: var(--fg-muted);
+  --color-dim: var(--fg-dim);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-danger: var(--danger);
+  --color-warn: var(--warn);
+  --color-ok: var(--ok);
+  --color-link: var(--link);
+}
+
