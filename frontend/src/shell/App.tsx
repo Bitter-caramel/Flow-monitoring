@@ -18,17 +18,17 @@
  *
  * 整体高度撑满（h-screen + flex-col），仅工作区 overflow-auto ⇒ 顶栏/导航/状态栏固定。
  */
-import { useState } from 'react'
 import { panelRegistry } from './registry'
 import type { PanelPlugin } from './registry'
 import { LayerNav } from './LayerNav'
 import { TopBar } from './TopBar'
 import { StatusBar } from './StatusBar'
 import { useAppStatus } from './useAppStatus'
+import { useActivePanel } from './useActivePanel'
 
 export function App() {
-  const panels = panelRegistry.list()
-  const [activeId, setActiveId] = useState<string>(() => panels[0]?.manifest.id ?? '')
+  // ★ 当前面板来自 URL（hash 路由，URL 是唯一数据源）：刷新保持、可分享、可前进后退。
+  const { activeId, select } = useActivePanel()
 
   // 全局状态只请求一次，顶栏与状态栏共用（避免重复打后端）。
   const status = useAppStatus()
@@ -41,7 +41,7 @@ export function App() {
       <TopBar connection={status.state} />
 
       <div className="flex min-h-0 flex-1">
-        <LayerNav activeId={activeId} onSelect={setActiveId} />
+        <LayerNav activeId={activeId} onSelect={select} />
 
         <main className="min-w-0 flex-1 overflow-auto p-4">
           {ActiveComponent ? (

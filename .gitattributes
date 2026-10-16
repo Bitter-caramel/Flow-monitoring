@@ -2,6 +2,11 @@
 *.go text eol=lf
 *.mod text eol=lf
 *.sum text eol=lf
+# 前端源码同样锁 LF：本机 core.autocrlf=true，不锁的话检出变 CRLF，与 *.go 混在一起造成行尾不一致。
+*.ts text eol=lf
+*.tsx text eol=lf
+*.css text eol=lf
+*.html text eol=lf
 # shell 脚本必须恒为 LF：本机 core.autocrlf=true，若不锁定，Windows 检出会变 CRLF，
 # 而 CRLF 的 .sh 在 Linux / WSL 里会直接报 "invalid option name" 之类错误（脚本形同报废）。
 *.sh text eol=lf
