@@ -1,5 +1,6 @@
 {
   "id": "modules.importer",
+  "core": true,
   "name": "流量导入",
   "version": "1.0.0",
   "layer": "L2",

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -97,6 +98,15 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 			"dir", cfg.ManifestDir,
 			"declared", len(loaded.List()),
 			"enabled", len(loaded.ListEnabled()))
+	}
+
+	// 启动任何模块之前做一次纯函数自检：Error 阻塞启动，Warning 只记录日志。
+	rep := reg.SelfCheck()
+	for _, w := range rep.Warnings {
+		logger.Warn("module self-check", "code", w.Code, "module", w.ModuleID, "msg", w.Message)
+	}
+	if !rep.OK {
+		return nil, fmt.Errorf("bootstrap: 模块自检未通过（%d 项错误）：%s", len(rep.Errors), summarize(rep.Errors))
 	}
 
 	h := health.New(mgr)
@@ -233,4 +243,23 @@ func descriptorIDs(ds []registry.Descriptor) []string {
 		ids[i] = d.ID
 	}
 	return ids
+}
+
+// summarize 把自检 Issue 拼成一行日志用摘要：`code(module)` 形式，最多前 5 条，
+// 超出部分以 `...(+N more)` 收尾。无 ModuleID 的（如 core_missing/topology_error）只写 code。
+func summarize(issues []registry.Issue) string {
+	const maxIssues = 5
+	parts := make([]string, 0, len(issues)+1)
+	for i, is := range issues {
+		if i >= maxIssues {
+			parts = append(parts, fmt.Sprintf("...(+%d more)", len(issues)-maxIssues))
+			break
+		}
+		if is.ModuleID != "" {
+			parts = append(parts, fmt.Sprintf("%s(%s)", is.Code, is.ModuleID))
+			continue
+		}
+		parts = append(parts, is.Code)
+	}
+	return strings.Join(parts, "; ")
 }

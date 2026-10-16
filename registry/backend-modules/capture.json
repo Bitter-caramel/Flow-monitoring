@@ -1,5 +1,6 @@
 {
   "id": "modules.capture",
+  "core": true,
   "name": "采集抽象",
   "version": "0.1.0",
   "layer": "L1",

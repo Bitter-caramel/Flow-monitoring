@@ -1,5 +1,6 @@
 {
   "id": "modules.query",
+  "core": true,
   "name": "查询服务",
   "version": "1.0.0",
   "layer": "L2",

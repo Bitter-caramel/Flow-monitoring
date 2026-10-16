@@ -52,6 +52,10 @@ type Descriptor struct {
 	Injects  []string `json:"injects,omitempty"`
 	HTTPBase string   `json:"http_base,omitempty"`
 	Binary   string   `json:"binary,omitempty"`
+	// Core 表示"核心模块"：构建与清单层面不可裁剪、不可删除。
+	// ★ 与 Enabled 是两件事：core 模块同样允许 enabled=false（这次不启动），
+	//   自检只会提示"核心模块未启用"，不阻塞启动。
+	Core bool `json:"core,omitempty"`
 }
 
 // IsEnabled 是否参与装配（缺省启用）。
