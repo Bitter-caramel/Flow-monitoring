@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// guardCountRE 匹配守卫输出里的"检查宿主闭包 <N> 个包"。
+var guardCountRE = regexp.MustCompile(`检查宿主闭包\s+\d+\s+个包`)
 
 // runCLI 调 run() 并收集退出码与两级输出（不碰 os.Exit / main）。
 func runCLI(t *testing.T, args ...string) (int, string, string) {
@@ -115,5 +119,31 @@ func TestRun_EmptyRegistryExit2(t *testing.T) {
 	code, _, stderr := runCLI(t, "--repo=../..", "--registry="+regDir)
 	if code != 2 {
 		t.Errorf("code = %d, want 2; stderr=%s", code, stderr)
+	}
+}
+
+// 测试 15：--guard-only 在真实仓库通过（退出码 0），并打印检查包数。
+func TestRun_GuardOnly_RealRepo(t *testing.T) {
+	code, stdout, stderr := runCLI(t, "--guard-only", "--repo=../..")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "检查宿主闭包") {
+		t.Errorf("stdout 缺 '检查宿主闭包': %q", stdout)
+	}
+	if !guardCountRE.MatchString(stdout) {
+		t.Errorf("stdout 缺检查包数: %q", stdout)
+	}
+	if !strings.Contains(stdout, "通过") {
+		t.Errorf("stdout 缺 '通过': %q", stdout)
+	}
+}
+
+// 测试 16：--list 不跑守卫（空目录、无 go.mod 仍返回 0，证明不依赖 go 工具链）。
+func TestRun_ListDoesNotRunGuard(t *testing.T) {
+	empty := t.TempDir()
+	code, stdout, stderr := runCLI(t, "--list", "--repo="+empty)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stdout=%s stderr=%s", code, stdout, stderr)
 	}
 }
