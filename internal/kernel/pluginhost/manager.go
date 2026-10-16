@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/go-hclog"
 	hplugin "github.com/hashicorp/go-plugin"
@@ -229,4 +231,117 @@ func (m *Manager) setState(id, state string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.states[id] = state
+}
+
+// ErrStopTimeout 表示模块在超时内没有完成优雅停止。
+//
+// ★ 调用方（如级联启停）应把它记成"未能确认在途数据已落地"——宁可如实标注，不假装干净。
+var ErrStopTimeout = errors.New("pluginhost: 优雅停止超时")
+
+// stopWithTimeout 在 timeout 内等待 stop() 返回：
+//   - stop() 成功 => nil；stop() 报错 => 原样返回该错误；
+//   - 超时 => 返回 ErrStopTimeout（只是"等不到了"，**强杀由调用方做**）；
+//   - timeout <= 0 => 不设超时（一直等）。
+//
+// done 带缓冲（容量 1），因此超时后 stop() 的 goroutine 仍能写入并退出，不会泄漏。
+func stopWithTimeout(stop func() error, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- stop() }()
+	if timeout <= 0 {
+		return <-done
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return ErrStopTimeout
+	}
+}
+
+// StopOne 优雅停止单个模块（★ 带超时兜底），步骤照 StopAll 的既有做法：
+//  1. 取 Process：不存在 => 明确错误；已是 stopped => 幂等成功；
+//  2. stopWithTimeout(p.Module.Stop, timeout)：超时/报错都**如实返回**（不吞），
+//     但后面的强杀与清理照做（进程确实要没）；
+//  3. bridge.UnregisterByModule 回收可逆副作用（服务注册 / HTTP 路由）；
+//  4. client.Kill() + setState(stopped)。
+//
+// ★ 不做"主动断流"：能保证"消费者已停"的是级联顺序（先停最末端消费者），见 modulecontrol。
+func (m *Manager) StopOne(_ context.Context, desc registry.Descriptor, timeout time.Duration) error {
+	m.mu.Lock()
+	p, ok := m.processes[desc.ID]
+	st := m.states[desc.ID]
+	m.mu.Unlock()
+
+	if !ok || p == nil {
+		return fmt.Errorf("pluginhost: 模块 %s 没有已启动的进程（无法停止）", desc.ID)
+	}
+	if st == stateStopped {
+		return nil // 幂等
+	}
+	if p.Module == nil {
+		p.client.Kill()
+		m.bridge.UnregisterByModule(desc.ID)
+		m.setState(desc.ID, stateStopped)
+		return fmt.Errorf("pluginhost: 模块 %s 的远程代理为空，已强杀进程", desc.ID)
+	}
+
+	err := stopWithTimeout(p.Module.Stop, timeout)
+	switch {
+	case err == nil:
+		m.logger.Info("module stopped", "id", desc.ID)
+	case errors.Is(err, ErrStopTimeout):
+		// ★ 如实记账：超时意味着"未能确认在途数据已落地"（10-6 丢告警的教训）。
+		m.logger.Error("module stop timed out; killed (in-flight data not confirmed)",
+			"id", desc.ID, "timeout", timeout.String())
+	default:
+		m.logger.Error("module stop failed; killed anyway", "id", desc.ID, "err", err)
+	}
+
+	p.client.Kill()
+	m.bridge.UnregisterByModule(desc.ID)
+	m.setState(desc.ID, stateStopped)
+	return err
+}
+
+// StartOne 启动单个模块（幂等）：
+//   - 从未 Launch => 先 Launch（复用既有实现：握手/失败清理都在里面）；
+//   - 已 Launch 且 stopped => 直接 p.Module.Start()（★ 不重新 Launch）；
+//   - 已 started => 幂等成功；
+//   - Start() 失败 => setState(error) 并返回错误（不吞）。
+func (m *Manager) StartOne(_ context.Context, desc registry.Descriptor) error {
+	m.mu.Lock()
+	p, ok := m.processes[desc.ID]
+	st := m.states[desc.ID]
+	m.mu.Unlock()
+
+	if ok && st == stateStarted {
+		return nil // 幂等
+	}
+	if ok && st == stateError {
+		// 上次 Start 失败：进程还在（launched），允许重试。
+		st = stateLaunched
+	}
+	if !ok || p == nil {
+		if err := m.Launch(desc); err != nil {
+			return err
+		}
+		m.mu.Lock()
+		p, ok = m.processes[desc.ID]
+		st = m.states[desc.ID]
+		m.mu.Unlock()
+		if !ok || p == nil {
+			return fmt.Errorf("pluginhost: 模块 %s Launch 后仍无进程", desc.ID)
+		}
+	}
+	_ = st
+	if err := p.Module.Start(); err != nil {
+		m.setState(desc.ID, stateError)
+		m.logger.Error("module start failed", "id", desc.ID, "err", err)
+		return fmt.Errorf("pluginhost: start %s: %w", desc.ID, err)
+	}
+	m.setState(desc.ID, stateStarted)
+	m.logger.Info("module started", "id", desc.ID)
+	return nil
 }
