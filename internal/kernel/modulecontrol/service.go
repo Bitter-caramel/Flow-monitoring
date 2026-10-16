@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"flow-monitoring/internal/kernel/logging"
 	"flow-monitoring/internal/kernel/registry"
@@ -46,6 +47,8 @@ var (
 type Options struct {
 	ManifestDir string          // 清单目录（空 = DefaultManifestDir）
 	Logger      *logging.Logger // 可空
+	Runtime     RuntimeBackend  // ★ 可选：nil = 只改清单（12-2 行为）
+	StopTimeout time.Duration   // ★ 可选：单模块停止超时（默认 DefaultStopTimeout=10s）
 }
 
 // ModuleView 给入口展示的模块视图。
@@ -97,9 +100,11 @@ type ChangeResult struct {
 
 // Service 模块控制面服务层（唯一行为实现）。
 type Service struct {
-	dir    string
-	logger *logging.Logger
-	reg    *registry.Registry
+	dir         string
+	logger      *logging.Logger
+	reg         *registry.Registry
+	runtime     RuntimeBackend // ★ 可选：nil = 只改清单（12-2 行为）
+	stopTimeout time.Duration  // ★ 单模块停止超时；New 时兜底为 DefaultStopTimeout
 }
 
 // New 构造服务：校验并加载清单目录。
@@ -122,26 +127,39 @@ func New(opts Options) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("modulecontrol: 加载清单目录 %s: %w", dir, err)
 	}
-	return &Service{dir: dir, logger: opts.Logger, reg: reg}, nil
+	timeout := opts.StopTimeout
+	if timeout <= 0 {
+		timeout = DefaultStopTimeout
+	}
+	return &Service{dir: dir, logger: opts.Logger, reg: reg, runtime: opts.Runtime, stopTimeout: timeout}, nil
 }
 
 // List 列出全部模块视图（按 ID 升序）。
+//
+// State：有后端就查后端（未出现的模块给 StateUnknown）；无后端仍恒为 StateUnknown。
 func (s *Service) List() ([]ModuleView, error) {
 	mods := s.reg.List() // 已按 ID 升序
+	states := s.runtimeStates()
 	out := make([]ModuleView, 0, len(mods))
 	for _, d := range mods {
-		out = append(out, toView(d))
+		v := toView(d)
+		v.State = stateOf(states, d.ID)
+		out = append(out, v)
 	}
 	return out, nil
 }
 
 // Show 返回单个模块视图；不存在 ⇒ ErrNotFound。
+//
+// State：同 List，有后端就查后端，未出现 ⇒ StateUnknown。
 func (s *Service) Show(id string) (ModuleView, error) {
 	d, ok := s.reg.Get(id)
 	if !ok {
 		return ModuleView{}, ErrNotFound
 	}
-	return toView(d), nil
+	v := toView(d)
+	v.State = stateOf(s.runtimeStates(), id)
+	return v, nil
 }
 
 // Graph 返回依赖图。两种边来源都会出现：

@@ -2,6 +2,7 @@ package modulecontrol
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -448,4 +449,333 @@ func TestNewMissingDir(t *testing.T) {
 	} else if !strings.Contains(err.Error(), missing) {
 		t.Errorf("错误信息应含路径 %s, got %v", missing, err)
 	}
+}
+
+// ------------------------- 7. 级联启停（★ 全用假 backend，不碰真进程） -------------------------
+
+// fakeRuntime 只记录调用、不做真进程操作的假后端；可按模块注入错误。
+type fakeRuntime struct {
+	states   map[string]string
+	stopErr  map[string]error
+	startErr map[string]error
+	stops    []string
+	starts   []string
+}
+
+func newFakeRuntime(states map[string]string) *fakeRuntime {
+	if states == nil {
+		states = map[string]string{}
+	}
+	return &fakeRuntime{states: states, stopErr: map[string]error{}, startErr: map[string]error{}}
+}
+
+func (f *fakeRuntime) States() map[string]string { return f.states }
+
+func (f *fakeRuntime) StopOne(_ context.Context, id string) error {
+	f.stops = append(f.stops, id)
+	return f.stopErr[id]
+}
+
+func (f *fakeRuntime) StartOne(_ context.Context, id string) error {
+	f.starts = append(f.starts, id)
+	return f.startErr[id]
+}
+
+// TestStateFromRuntime：List/Show 的 State——装后端取后端值、未出现的给 unknown；不装仍 unknown。
+func TestStateFromRuntime(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "a.json", registry.Descriptor{ID: "mod.a", Layer: "L1"})
+	writeManifest(t, dir, "b.json", registry.Descriptor{ID: "mod.b", Layer: "L2"})
+
+	// (a) 无后端 ⇒ 恒 unknown。
+	s, err := New(Options{ManifestDir: dir})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if v, _ := s.Show("mod.a"); v.State != StateUnknown {
+		t.Errorf("无后端 Show(mod.a).State = %q, want %q", v.State, StateUnknown)
+	}
+	views, _ := s.List()
+	for _, mv := range views {
+		if mv.State != StateUnknown {
+			t.Errorf("无后端 List %s.State = %q, want unknown", mv.ID, mv.State)
+		}
+	}
+
+	// (b) Options.Runtime ⇒ 取到后端值；未出现的模块给 unknown。
+	rt := newFakeRuntime(map[string]string{"mod.a": StateStarted})
+	s2, err := New(Options{ManifestDir: dir, Runtime: rt})
+	if err != nil {
+		t.Fatalf("New(runtime): %v", err)
+	}
+	va, err := s2.Show("mod.a")
+	if err != nil {
+		t.Fatalf("Show(mod.a): %v", err)
+	}
+	if va.State != StateStarted {
+		t.Errorf("有后端 Show(mod.a).State = %q, want %q", va.State, StateStarted)
+	}
+	if vb, _ := s2.Show("mod.b"); vb.State != StateUnknown {
+		t.Errorf("后端未给出 mod.b ⇒ State = %q, want unknown", vb.State)
+	}
+	listStates := map[string]string{}
+	lv, _ := s2.List()
+	for _, mv := range lv {
+		listStates[mv.ID] = mv.State
+	}
+	if listStates["mod.a"] != StateStarted || listStates["mod.b"] != StateUnknown {
+		t.Errorf("List 的 State = %v, want a=started b=unknown", listStates)
+	}
+
+	// (c) WithRuntime 注入同样生效（换一个后端值）。
+	s2.WithRuntime(newFakeRuntime(map[string]string{"mod.b": StateStopped}))
+	if vb, _ := s2.Show("mod.b"); vb.State != StateStopped {
+		t.Errorf("WithRuntime 后 Show(mod.b).State = %q, want %q", vb.State, StateStopped)
+	}
+}
+
+// TestSetEnabledCascadeOrder：★ 级联顺序必须是反向拓扑序（先关最末端消费者，最后目标）。
+func TestSetEnabledCascadeOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "a.json", registry.Descriptor{ID: "mod.a", Layer: "L1"})
+	writeManifest(t, dir, "b.json", registry.Descriptor{ID: "mod.b", Layer: "L2", Depends: []string{"mod.a"}})
+	writeManifest(t, dir, "c.json", registry.Descriptor{ID: "mod.c", Layer: "L3", Depends: []string{"mod.b"}})
+
+	rt := newFakeRuntime(map[string]string{"mod.a": StateStarted, "mod.b": StateStarted, "mod.c": StateStarted})
+	s, err := New(Options{ManifestDir: dir, Runtime: rt})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	res, err := s.SetEnabledCascade(context.Background(), "mod.a", false)
+	if err != nil {
+		t.Fatalf("SetEnabledCascade(mod.a,false): %v", err)
+	}
+
+	// ★ Steps 顺序必须是 C、B、A（先停最末端消费者，最后目标）。
+	var gotOrder []string
+	for _, st := range res.Steps {
+		gotOrder = append(gotOrder, st.ID)
+		if st.Action != "stop" || !st.OK {
+			t.Errorf("Step %+v, want action=stop ok=true", st)
+		}
+	}
+	if !reflect.DeepEqual(gotOrder, []string{"mod.c", "mod.b", "mod.a"}) {
+		t.Errorf("Steps 顺序 = %v, want [mod.c mod.b mod.a]", gotOrder)
+	}
+	if !reflect.DeepEqual(rt.stops, []string{"mod.c", "mod.b", "mod.a"}) {
+		t.Errorf("后端 StopOne 调用顺序 = %v, want [mod.c mod.b mod.a]", rt.stops)
+	}
+	if len(rt.starts) != 0 {
+		t.Errorf("停用过程不应调用 StartOne: %v", rt.starts)
+	}
+	if !res.Applied {
+		t.Errorf("有后端时 Applied 应为 true")
+	}
+	if !reflect.DeepEqual(res.Stopped, []string{"mod.c", "mod.b", "mod.a"}) {
+		t.Errorf("Stopped = %v, want [mod.c mod.b mod.a]", res.Stopped)
+	}
+	// 清单：mod.a 已禁用。
+	reg, _ := registry.Load(dir)
+	if d, ok := reg.Get("mod.a"); !ok || d.IsEnabled() {
+		t.Errorf("mod.a 应已写回 enabled=false")
+	}
+}
+
+// TestSetEnabledCascadeCoreProtection：core 目标 / 连带停 core ⇒ 拒绝且不动任何东西。
+func TestSetEnabledCascadeCoreProtection(t *testing.T) {
+	// (a) 目标 core ⇒ ErrCoreModule。
+	dir := t.TempDir()
+	writeManifest(t, dir, "core.json", registry.Descriptor{ID: "mod.core", Core: true, Layer: "L1"})
+	corePath := filepath.Join(dir, "core.json")
+	before, _ := os.ReadFile(corePath)
+
+	rt := newFakeRuntime(nil)
+	s, err := New(Options{ManifestDir: dir, Runtime: rt})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.SetEnabledCascade(context.Background(), "mod.core", false); !errors.Is(err, ErrCoreModule) {
+		t.Fatalf("err = %v, want ErrCoreModule", err)
+	}
+	if len(rt.stops) != 0 || len(rt.starts) != 0 {
+		t.Errorf("core 被拒时不应调用后端: stops=%v starts=%v", rt.stops, rt.starts)
+	}
+	if after, _ := os.ReadFile(corePath); !bytes.Equal(before, after) {
+		t.Errorf("core 清单被意外修改")
+	}
+
+	// (b) 目标非 core 但"连带会停 core" ⇒ 返回错误、后端一次都没调用、清单字节未变。
+	dir2 := t.TempDir()
+	writeManifest(t, dir2, "x.json", registry.Descriptor{ID: "mod.x", Layer: "L1"})
+	writeManifest(t, dir2, "y.json", registry.Descriptor{ID: "mod.y", Layer: "L2", Depends: []string{"mod.x"}})
+	writeManifest(t, dir2, "core2.json", registry.Descriptor{ID: "mod.core2", Core: true, Layer: "L3", Depends: []string{"mod.y"}})
+	xPath := filepath.Join(dir2, "x.json")
+	xBefore, _ := os.ReadFile(xPath)
+
+	rt2 := newFakeRuntime(nil)
+	s2, err := New(Options{ManifestDir: dir2, Runtime: rt2})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s2.SetEnabledCascade(context.Background(), "mod.x", false); err == nil {
+		t.Fatalf("连带停 core 应返回错误")
+	} else if !strings.Contains(err.Error(), "mod.core2") {
+		t.Errorf("错误信息应含 BlockReason 里的 core 模块 mod.core2: %v", err)
+	}
+	if len(rt2.stops) != 0 || len(rt2.starts) != 0 {
+		t.Errorf("被拒时不应调用后端: stops=%v starts=%v", rt2.stops, rt2.starts)
+	}
+	if xAfter, _ := os.ReadFile(xPath); !bytes.Equal(xBefore, xAfter) {
+		t.Errorf("被拒时清单不应被修改")
+	}
+
+	// (c) 不存在 ⇒ ErrNotFound，且不调用后端。
+	if _, err := s2.SetEnabledCascade(context.Background(), "不存在", false); !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestSetEnabledCascadeFailureAccounting：★ 某步失败不吞——记 Failed、继续其余、清单仍写。
+func TestSetEnabledCascadeFailureAccounting(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "a.json", registry.Descriptor{ID: "mod.a", Layer: "L1"})
+	writeManifest(t, dir, "b.json", registry.Descriptor{ID: "mod.b", Layer: "L2", Depends: []string{"mod.a"}})
+	writeManifest(t, dir, "c.json", registry.Descriptor{ID: "mod.c", Layer: "L3", Depends: []string{"mod.b"}})
+
+	rt := newFakeRuntime(map[string]string{"mod.a": StateStarted})
+	rt.stopErr["mod.b"] = errors.New("boom")
+
+	s, err := New(Options{ManifestDir: dir, Runtime: rt})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := s.SetEnabledCascade(context.Background(), "mod.a", false)
+	if err != nil {
+		t.Fatalf("SetEnabledCascade: %v", err)
+	}
+
+	// ★ 其余步骤仍执行：Steps = C, B(失败), A。
+	var ids []string
+	for _, st := range res.Steps {
+		ids = append(ids, st.ID)
+	}
+	if !reflect.DeepEqual(ids, []string{"mod.c", "mod.b", "mod.a"}) {
+		t.Errorf("Steps 顺序 = %v, want [mod.c mod.b mod.a]", ids)
+	}
+	var bStep *StepResult
+	for i := range res.Steps {
+		if res.Steps[i].ID == "mod.b" {
+			bStep = &res.Steps[i]
+		}
+	}
+	if bStep == nil || bStep.OK || bStep.Err == "" {
+		t.Errorf("mod.b 步应 OK=false 且带 Err: %+v", bStep)
+	}
+	if !reflect.DeepEqual(res.Failed, []string{"mod.b"}) {
+		t.Errorf("Failed = %v, want [mod.b]", res.Failed)
+	}
+	if !reflect.DeepEqual(res.Stopped, []string{"mod.c", "mod.a"}) {
+		t.Errorf("Stopped = %v, want [mod.c mod.a]", res.Stopped)
+	}
+	if !reflect.DeepEqual(rt.stops, []string{"mod.c", "mod.b", "mod.a"}) {
+		t.Errorf("即便 B 失败也应继续停 A: %v", rt.stops)
+	}
+	if !res.Applied {
+		t.Errorf("Applied 应为 true（清单仍写回）")
+	}
+	reg, _ := registry.Load(dir)
+	if d, ok := reg.Get("mod.a"); !ok || d.IsEnabled() {
+		t.Errorf("mod.a 应写回 enabled=false")
+	}
+}
+
+// TestSetEnabledCascadeNoBackend：无后端 ⇒ Applied=false + Steps 空 + RestartHint 非空，清单仍改。
+func TestSetEnabledCascadeNoBackend(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "x.json", registry.Descriptor{ID: "mod.x", Layer: "L2"})
+	s, err := New(Options{ManifestDir: dir}) // 不装后端
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := s.SetEnabledCascade(context.Background(), "mod.x", false)
+	if err != nil {
+		t.Fatalf("SetEnabledCascade: %v", err)
+	}
+	if res.Applied {
+		t.Errorf("无后端 Applied 应为 false")
+	}
+	if len(res.Steps) != 0 {
+		t.Errorf("无后端 Steps 应为空: %+v", res.Steps)
+	}
+	if res.RestartHint != RestartHint {
+		t.Errorf("RestartHint = %q, want %q", res.RestartHint, RestartHint)
+	}
+	reg, _ := registry.Load(dir)
+	if d, ok := reg.Get("mod.x"); !ok || d.IsEnabled() {
+		t.Errorf("mod.x 应写回 enabled=false")
+	}
+}
+
+// TestSetEnabledCascadeEnableOnlySelf：启用只调一次 StartOne(x)，不动别的模块。
+func TestSetEnabledCascadeEnableOnlySelf(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "x.json", registry.Descriptor{ID: "mod.x", Layer: "L1", Enabled: boolPtr(false)})
+	writeManifest(t, dir, "y.json", registry.Descriptor{ID: "mod.y", Layer: "L2", Depends: []string{"mod.x"}})
+
+	rt := newFakeRuntime(map[string]string{"mod.x": StateStopped})
+	s, err := New(Options{ManifestDir: dir, Runtime: rt})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := s.SetEnabledCascade(context.Background(), "mod.x", true)
+	if err != nil {
+		t.Fatalf("SetEnabledCascade(mod.x,true): %v", err)
+	}
+	if !reflect.DeepEqual(rt.starts, []string{"mod.x"}) {
+		t.Errorf("StartOne 调用 = %v, want [mod.x]", rt.starts)
+	}
+	if len(rt.stops) != 0 {
+		t.Errorf("启用不应调用 StopOne: %v", rt.stops)
+	}
+	if len(res.Steps) != 1 || res.Steps[0].ID != "mod.x" || res.Steps[0].Action != "start" || !res.Steps[0].OK {
+		t.Errorf("Steps = %+v, want 仅 mod.x start ok", res.Steps)
+	}
+	if !res.Applied {
+		t.Errorf("有后端启用 Applied 应为 true")
+	}
+	reg, _ := registry.Load(dir)
+	if d, ok := reg.Get("mod.x"); !ok || !d.IsEnabled() {
+		t.Errorf("mod.x 应写回 enabled=true")
+	}
+	if d, ok := reg.Get("mod.y"); !ok || !d.IsEnabled() {
+		t.Errorf("mod.y 不应被动到")
+	}
+}
+
+// TestSetEnabledIgnoresRuntime：12-2 旧方法 SetEnabled 行为不变——只改清单、不调后端。
+func TestSetEnabledIgnoresRuntime(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "x.json", registry.Descriptor{ID: "mod.x", Layer: "L2"})
+
+	rt := newFakeRuntime(map[string]string{"mod.x": StateStarted})
+	s, err := New(Options{ManifestDir: dir, Runtime: rt})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := s.SetEnabled("mod.x", false)
+	if err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
+	if res.RestartHint == "" || res.Enabled {
+		t.Errorf("ChangeResult = %+v", res)
+	}
+	if len(rt.stops) != 0 || len(rt.starts) != 0 {
+		t.Errorf("SetEnabled（12-2 旧方法）不应调用后端: stops=%v starts=%v", rt.stops, rt.starts)
+	}
+	reg, _ := registry.Load(dir)
+	if d, ok := reg.Get("mod.x"); !ok || d.IsEnabled() {
+		t.Errorf("mod.x 应写回 enabled=false")
+	}
+	assertNoTempFiles(t, dir)
 }
