@@ -70,7 +70,10 @@ type ModuleView struct {
 	Injects  []string `json:"injects,omitempty"`
 	HTTPBase string   `json:"http_base,omitempty"`
 	Binary   string   `json:"binary,omitempty"`
-	State    string   `json:"state"` // ★ 本步恒为 StateUnknown（12-3 才接真实运行态）
+	// HasBinary 表示插件目录里存在该模块的可执行文件（与 Impact.HasBinary 同源）。
+	// false 只代表"没找到二进制"，不阻止清单 enabled=true；界面必须如实标注。
+	HasBinary bool   `json:"has_binary"`
+	State     string `json:"state"` // ★ 本步恒为 StateUnknown（12-3 才接真实运行态）
 }
 
 // Edge 一条依赖边：From 依赖 To（⇒ To 必须先启、后停）。
@@ -193,7 +196,9 @@ func (s *Service) Graph() (Graph, error) {
 	mods := s.reg.List()
 	nodes := make([]ModuleView, 0, len(mods))
 	for _, d := range mods {
-		nodes = append(nodes, toView(d))
+		v := toView(d)
+		v.HasBinary = s.hasBinary(d.Binary)
+		nodes = append(nodes, v)
 	}
 	edges := s.edges()
 	if edges == nil {
@@ -212,6 +217,14 @@ func (s *Service) SelfCheck() (registry.SelfCheckReport, error) {
 // Dependents = 反向依赖闭包（谁直接或间接依赖 id），按关闭顺序（反向拓扑序）给出：
 // 先关最末端消费者，最后才轮到 id（id 本身不在列表里）。
 // 用分层/Kahn 算法在"闭包诱导子图"上求拓扑序再取反，★ 不依赖 layer 决定顺序。
+// hasBinary 判定插件目录里是否存在该模块的可执行文件；binaryChecker 为 nil 时恒 false（不猜、不 panic）。
+// ★ Impact 与 Graph 必须共用这一处判定，否则会出现"详情说有、图里说没有"的自相矛盾。
+func (s *Service) hasBinary(binary string) bool {
+	if s.binaryChecker == nil || binary == "" {
+		return false
+	}
+	return s.binaryChecker(binary)
+}
 func (s *Service) Impact(id string) (Impact, error) {
 	d, ok := s.reg.Get(id)
 	if !ok {
@@ -221,10 +234,7 @@ func (s *Service) Impact(id string) (Impact, error) {
 	if order == nil {
 		order = []string{}
 	}
-	hasBinary := false
-	if s.binaryChecker != nil {
-		hasBinary = s.binaryChecker(d.Binary)
-	}
+	hasBinary := s.hasBinary(d.Binary)
 	imp := Impact{ID: id, Core: d.Core, Dependents: order, HasBinary: hasBinary}
 
 	if d.Core {

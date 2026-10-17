@@ -353,4 +353,43 @@ func TestModulesAPI(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("10_graph_json_has_binary", func(t *testing.T) {
+		dir := t.TempDir()
+		writeManifest(t, dir, registry.Descriptor{ID: "mod.hasbin", Binary: "has-bin"})
+		writeManifest(t, dir, registry.Descriptor{ID: "mod.nobin", Binary: "no-bin"})
+		svc, err := modulecontrol.New(modulecontrol.Options{
+			ManifestDir:   dir,
+			BinaryChecker: func(binary string) bool { return binary == "has-bin" },
+		})
+		if err != nil {
+			t.Fatalf("modulecontrol.New: %v", err)
+		}
+		s := New("127.0.0.1:0", logging.New(logging.LevelInfo, "json", io.Discard))
+		RegisterModulesAPI(s, svc)
+
+		status, body := do(t, s, http.MethodGet, "/api/modules/graph")
+		if status != http.StatusOK {
+			t.Fatalf("graph status = %d, want 200; body=%s", status, body)
+		}
+		var raw struct {
+			Nodes []map[string]any `json:"nodes"`
+		}
+		if err := json.Unmarshal(body, &raw); err != nil {
+			t.Fatalf("解析 graph: %v; body=%s", err, body)
+		}
+		want := map[string]bool{"mod.hasbin": true, "mod.nobin": false}
+		for _, node := range raw.Nodes {
+			id, _ := node["id"].(string)
+			v, ok := node["has_binary"]
+			if !ok {
+				t.Errorf("%s graph 节点 JSON 缺少 has_binary 字段: %s", id, body)
+				continue
+			}
+			got, ok := v.(bool)
+			if !ok || got != want[id] {
+				t.Errorf("%s graph has_binary = %v (%T), want %v; body=%s", id, v, v, want[id], body)
+			}
+		}
+	})
 }
