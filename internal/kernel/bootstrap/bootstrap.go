@@ -11,6 +11,7 @@ package bootstrap
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -33,15 +34,16 @@ import (
 
 // App 应用实例（进程内基础设施 + 模块进程管理器）。
 type App struct {
-	Cfg       *config.Config
-	Logger    *logging.Logger
-	LogFile   *os.File
-	Bus       *eventbus.Bus
-	Storage   storage.Storage
-	Registry  *registry.Registry
-	Manager   *pluginhost.Manager
-	Health    *health.Health
-	Transport *transport.Server
+	Cfg          *config.Config
+	Logger       *logging.Logger
+	LogFile      *os.File
+	Bus          *eventbus.Bus
+	Storage      storage.Storage
+	Registry     *registry.Registry
+	Manager      *pluginhost.Manager
+	Health       *health.Health
+	Transport    *transport.Server
+	storageWatch *storageWatch
 }
 
 // Bootstrap 创建 App 并装配进程内基础设施。
@@ -74,6 +76,16 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 
 	// 宿主桥接 + 模块进程管理器
 	bridge := pluginhost.NewBridge(cfg, logger, bus, db)
+
+	// 存储巡检：每 10s 检查一次；断了自动重连、恢复后自动接回（不重启后端）。
+	// 用 seed 把启动时已打开的句柄交给巡检，首次 tick 只 Ping 不重复 Open。
+	watch := newStorageWatch(
+		&pgProbe{dsn: cfg.Database.DSN, maxConns: cfg.Database.MaxConns},
+		bridge.SetDB,
+		logger,
+	)
+	watch.seed(db)
+
 	mgr := pluginhost.NewManager(cfg.PluginDir, cfg, logger, bridge)
 	if err := mgr.Start(); err != nil {
 		return nil, fmt.Errorf("bootstrap: plugin manager: %w", err)
@@ -115,7 +127,22 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 	ts := transport.New(cfg.Server.HTTPAddr, logger)
 	ts.SetGatewayResolver(bridge.Resolve)
 	ts.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		h.Handler().ServeHTTP(w, r)
+		// 在既有健康报告后追加 storage 字段，让"存储降级被看见"。
+		rep := h.Report()
+		code := http.StatusOK
+		if rep.Status == health.StatusDown {
+			code = http.StatusServiceUnavailable
+		}
+		body := struct {
+			health.Report
+			Storage StorageHealth `json:"storage"`
+		}{
+			Report:  rep,
+			Storage: watch.HealthView(),
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(body)
 	})
 	ts.SetStaticDir(cfg.StaticDir)
 
@@ -129,20 +156,26 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 	transport.RegisterModulesAPI(ts, mctl)
 
 	return &App{
-		Cfg:       cfg,
-		Logger:    logger,
-		LogFile:   logFile,
-		Bus:       bus,
-		Storage:   db,
-		Registry:  reg,
-		Manager:   mgr,
-		Health:    h,
-		Transport: ts,
+		Cfg:          cfg,
+		Logger:       logger,
+		LogFile:      logFile,
+		Bus:          bus,
+		Storage:      db,
+		Registry:     reg,
+		Manager:      mgr,
+		Health:       h,
+		Transport:    ts,
+		storageWatch: watch,
 	}, nil
 }
 
 // Start 按拓扑序启动模块进程，然后起 HTTP 网关。
 func (a *App) Start(ctx context.Context) error {
+	// 存储巡检：随应用生命周期启动（立即跑一次，此后每 10s）。
+	if a.storageWatch != nil {
+		a.storageWatch.Start(ctx)
+	}
+
 	order, err := a.Registry.TopologicalSort()
 	if err != nil {
 		a.Logger.Error("module topology invalid", "err", err)
@@ -189,7 +222,13 @@ func (a *App) Shutdown(ctx context.Context) error {
 	if err := a.Manager.StopAll(ctx); err != nil {
 		a.Logger.Error("stop modules", "err", err)
 	}
-	if a.Storage != nil {
+	// 先停巡检（取消 + 等待退出），再关闭它当前持有的最新存储句柄。
+	if a.storageWatch != nil {
+		a.storageWatch.Stop()
+		if db := a.storageWatch.currentDB(); db != nil {
+			_ = db.Close()
+		}
+	} else if a.Storage != nil {
 		_ = a.Storage.Close()
 	}
 	a.Bus.Close()
