@@ -269,7 +269,7 @@ function NodeDetail({ node }: { node: GraphNode }) {
       <DetailRow label="binary" value={node.binary || '-'} />
       <DetailRow label="可执行文件" value={node.has_binary ? '有' : '无'} />
       {!node.has_binary && (
-        <div className="text-warn text-xs">启用也起不来（需先有 bin/plugins/{node.binary || '<binary>'}）</div>
+        <div className="text-warn text-xs">无法启用（需先有 bin/plugins/{node.binary || '<binary>'}）</div>
       )}
     </div>
   )
