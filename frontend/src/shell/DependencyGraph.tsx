@@ -438,7 +438,7 @@ export function DependencyGraph({
                 onPointerDown={(e) => handleNodePointerDown(e, n.id)}
                 style={{ cursor: dragging ? 'grabbing' : 'grab' }}
               >
-                <title>{`${n.name} ${n.version}`}</title>
+                <title>{`${n.name} ${n.version} · 启用：${n.enabled ? '是' : '否'}`}</title>
                 <rect
                   x={p.x}
                   y={p.y}
@@ -449,10 +449,18 @@ export function DependencyGraph({
                   stroke={selected ? 'var(--accent)' : 'var(--border-subtle)'}
                   strokeWidth={selected ? 2 : 1}
                 />
-                <text x={p.x + 10} y={p.y + 17} fill="var(--fg)" fontSize={12} fontWeight={600}>
+                {/* ★ 启用/未启用圆点（清单层 enabled）：绿=启用、红=未启用。
+                    与右侧的运行态符号（▲/○/■/✕）是两件事：这里说"配没配"，那里说"跑没跑"。 */}
+                <circle
+                  cx={p.x + 10}
+                  cy={p.y + 13}
+                  r={3.5}
+                  fill={n.enabled ? 'var(--ok)' : 'var(--danger)'}
+                />
+                <text x={p.x + 20} y={p.y + 17} fill="var(--fg)" fontSize={12} fontWeight={600}>
                   {n.name}
                 </text>
-                <text x={p.x + 10} y={p.y + 32} fill="var(--fg-dim)" fontSize={9} className="mono">
+                <text x={p.x + 20} y={p.y + 32} fill="var(--fg-dim)" fontSize={9} className="mono">
                   {n.version}
                 </text>
                 {/* 状态双编码：色块 + 符号 */}

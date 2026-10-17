@@ -210,3 +210,129 @@ export interface ModuleGraph {
 export function fetchModulesGraph(timeoutMs = 3000): Promise<ModuleGraph> {
   return getJSON<ModuleGraph>('/api/modules/graph', timeoutMs)
 }
+
+/**
+ * 停用某模块的影响面（GET /api/modules/{id}/impact）。
+ *
+ * 对齐后端 modulecontrol.Impact：
+ *   - core：目标本身是否为核心模块；
+ *   - dependents：直接/间接依赖它的模块，按级联关闭顺序给出；
+ *   - can_disable：false 表示不可停用（目标是 core，或停它会连带停 core）；
+ *   - block_reason：can_disable=false 时的原因，界面原样展示。
+ *
+ * ★ POST /api/modules/{id}/disable?dry_run=1 返回的是同一结构（200 预演结果，不是错误）。
+ */
+export interface ModuleImpact {
+  id: string
+  core: boolean
+  dependents: string[]
+  can_disable: boolean
+  block_reason?: string
+}
+
+/** 级联启停里单个模块的一步结果（对齐后端 modulecontrol.StepResult）。 */
+export interface CascadeStep {
+  id: string
+  /** "stop" 或 "start"（后端按实际动作给出）。 */
+  action: string
+  ok: boolean
+  /** ok=false 时的错误原文；成功时后端省略该字段。 */
+  err?: string
+}
+
+/** 一次级联启停的完整账本（对齐后端 modulecontrol.CascadeResult）。 */
+export interface CascadeResult {
+  id: string
+  enabled: boolean
+  /** 实际执行顺序（与 Impact.Dependents 同序）。 */
+  steps: CascadeStep[]
+  /** 执行成功的模块（启用时只含自己）。 */
+  stopped: string[]
+  /** 执行失败的模块。 */
+  failed: string[]
+  /** applied=false 表示没有运行期后端，只改了清单，需要重启生效。 */
+  applied: boolean
+  restart_hint?: string
+}
+
+/** 后端 nil slice 会被编码成 JSON null：统一归一化，避免界面 `.length` 崩溃。 */
+function normalizeImpact(raw: ModuleImpact): ModuleImpact {
+  return {
+    ...raw,
+    dependents: Array.isArray(raw.dependents) ? raw.dependents : [],
+    can_disable: raw.can_disable === true,
+  }
+}
+
+/** 同上：级联账本里的数组字段一律归一化为数组。 */
+function normalizeCascade(raw: CascadeResult): CascadeResult {
+  return {
+    ...raw,
+    steps: Array.isArray(raw.steps) ? raw.steps : [],
+    stopped: Array.isArray(raw.stopped) ? raw.stopped : [],
+    failed: Array.isArray(raw.failed) ? raw.failed : [],
+  }
+}
+
+/**
+ * 读取非 2xx 响应的后端文案，供界面原样展示。
+ *
+ * 后端 writeErr 统一返回 {"error": "..."}；Impact 结构则可能带 block_reason。
+ * 优先取 error，其次 block_reason，最后退回响应原文 / HTTP 状态。
+ */
+async function readErrorDetail(resp: Response): Promise<string> {
+  let text = ''
+  try {
+    text = await resp.text()
+  } catch {
+    return ''
+  }
+  if (!text) return ''
+  try {
+    const body = JSON.parse(text) as { error?: unknown; block_reason?: unknown }
+    if (typeof body.error === 'string' && body.error) return body.error
+    if (typeof body.block_reason === 'string' && body.block_reason) return body.block_reason
+  } catch {
+    // 非 JSON（如纯文本错误）：保留原文。
+  }
+  return text
+}
+
+/** 带后端错误文案的 JSON POST（不设短超时：级联停模块可能耗时较久）。 */
+async function postJSON<T>(path: string): Promise<T> {
+  const resp = await fetch(path, {
+    method: 'POST',
+    headers: { Accept: 'application/json' },
+  })
+  if (!resp.ok) {
+    const detail = await readErrorDetail(resp)
+    throw new Error(detail || `HTTP ${resp.status} ${resp.statusText}`)
+  }
+  return (await resp.json()) as T
+}
+
+/** 读取停用影响面（GET /api/modules/{id}/impact）。 */
+export async function fetchModuleImpact(id: string, timeoutMs = 3000): Promise<ModuleImpact> {
+  const raw = await getJSON<ModuleImpact>(
+    `/api/modules/${encodeURIComponent(id)}/impact`,
+    timeoutMs,
+  )
+  return normalizeImpact(raw)
+}
+
+/** 启用模块（POST /api/modules/{id}/enable）；只启动它自己。 */
+export async function postModuleEnable(id: string): Promise<CascadeResult> {
+  const raw = await postJSON<CascadeResult>(`/api/modules/${encodeURIComponent(id)}/enable`)
+  return normalizeCascade(raw)
+}
+
+/**
+ * 停用模块（POST /api/modules/{id}/disable）；级联先停依赖它的模块。
+ *
+ * 409/400 等非 2xx 一律抛出带后端 error/block_reason 文案的 Error，界面原样展示。
+ * 注意：级联中某步失败仍可能返回 200，失败明细在 CascadeResult.failed/steps 里。
+ */
+export async function postModuleDisable(id: string): Promise<CascadeResult> {
+  const raw = await postJSON<CascadeResult>(`/api/modules/${encodeURIComponent(id)}/disable`)
+  return normalizeCascade(raw)
+}
