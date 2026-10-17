@@ -15,3 +15,9 @@
 *.ps1 text
 internal/modules/rule/pipeline/testdata/** text eol=lf
 internal/hotpath/testdata/** text eol=lf
+# 规则文件锁 LF：本机 core.autocrlf=true，不锁的话检出变 CRLF。
+# 规则文本会被逐行解析（suricata/lex.go），行尾不一致会让"同一份规则在不同机器上行为不同"，
+# 那种问题极难查；同理锁住所有 .rules（含将来 rules/**）。
+*.rules text eol=lf
+# pcapng 样本是二进制，绝不能声明为文本（否则 git 会尝试做行尾转换并损坏文件）。
+*.pcapng binary
