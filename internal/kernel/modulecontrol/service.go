@@ -59,17 +59,19 @@ type Options struct {
 
 // ModuleView 给入口展示的模块视图。
 type ModuleView struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Version  string   `json:"version"`
-	Layer    string   `json:"layer"`
-	Core     bool     `json:"core"`
-	Enabled  bool     `json:"enabled"`
-	Depends  []string `json:"depends,omitempty"`
-	Provides []string `json:"provides,omitempty"`
-	Injects  []string `json:"injects,omitempty"`
-	HTTPBase string   `json:"http_base,omitempty"`
-	Binary   string   `json:"binary,omitempty"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Layer   string `json:"layer"`
+	Core    bool   `json:"core"`
+	Enabled bool   `json:"enabled"`
+	// InProcess 表示该模块以库形式内嵌进宿主进程，永不以独立进程运行。
+	InProcess bool     `json:"inprocess"`
+	Depends   []string `json:"depends,omitempty"`
+	Provides  []string `json:"provides,omitempty"`
+	Injects   []string `json:"injects,omitempty"`
+	HTTPBase  string   `json:"http_base,omitempty"`
+	Binary    string   `json:"binary,omitempty"`
 	// HasBinary 表示插件目录里存在该模块的可执行文件（与 Impact.HasBinary 同源）。
 	// false 只代表"没找到二进制"，不阻止清单 enabled=true；界面必须如实标注。
 	HasBinary bool   `json:"has_binary"`
@@ -93,6 +95,8 @@ type Graph struct {
 type Impact struct {
 	ID   string `json:"id"`
 	Core bool   `json:"core"`
+	// InProcess 表示该模块以库形式内嵌进宿主进程，不可单独启停。
+	InProcess bool `json:"inprocess"`
 	// Dependents 是直接或间接依赖它的模块，按关闭顺序给出（最先被关的消费者在前，
 	// target 本身不在列表里）。确定性排序。
 	Dependents []string `json:"dependents"`
@@ -235,7 +239,13 @@ func (s *Service) Impact(id string) (Impact, error) {
 		order = []string{}
 	}
 	hasBinary := s.hasBinary(d.Binary)
-	imp := Impact{ID: id, Core: d.Core, Dependents: order, HasBinary: hasBinary}
+	imp := Impact{ID: id, Core: d.Core, InProcess: d.InProcess, Dependents: order, HasBinary: hasBinary}
+
+	if d.InProcess {
+		imp.CanDisable = false
+		imp.BlockReason = "内嵌模块：随宿主进程运行，不可单独启停"
+		return imp, nil
+	}
 
 	if d.Core {
 		imp.CanDisable = false
@@ -590,17 +600,18 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 // toView 把 registry.Descriptor 转成对外的 ModuleView（State 恒为 unknown）。
 func toView(d registry.Descriptor) ModuleView {
 	return ModuleView{
-		ID:       d.ID,
-		Name:     d.Name,
-		Version:  d.Version,
-		Layer:    d.Layer,
-		Core:     d.Core,
-		Enabled:  d.IsEnabled(),
-		Depends:  append([]string(nil), d.Depends...),
-		Provides: append([]string(nil), d.Provides...),
-		Injects:  append([]string(nil), d.Injects...),
-		HTTPBase: d.HTTPBase,
-		Binary:   d.Binary,
-		State:    StateUnknown,
+		ID:        d.ID,
+		Name:      d.Name,
+		Version:   d.Version,
+		Layer:     d.Layer,
+		Core:      d.Core,
+		Enabled:   d.IsEnabled(),
+		InProcess: d.InProcess,
+		Depends:   append([]string(nil), d.Depends...),
+		Provides:  append([]string(nil), d.Provides...),
+		Injects:   append([]string(nil), d.Injects...),
+		HTTPBase:  d.HTTPBase,
+		Binary:    d.Binary,
+		State:     StateUnknown,
 	}
 }

@@ -40,6 +40,10 @@ const ReasonNoSource = "no_source"
 // 只用于 ModeAll / ModeCoreOnly；ModeModules 对缺源码直接报 ErrNoSource。
 const ReasonMissingDepSource = "missing_dep_source"
 
+// ReasonInProcess 是 Skipped.Reason 的取值：该模块是内嵌模块（以库形式链接进宿主），
+// 不产出独立二进制，因此不参与构建选择。
+const ReasonInProcess = "inprocess"
+
 // ErrNoSource 表示 ModeModules 选中了没有源码、无法构建的模块。
 var ErrNoSource = errors.New("buildplan: selected module has no source")
 
@@ -122,6 +126,12 @@ func Build(reg *registry.Registry, mode Mode, ids []string, hasSource func(regis
 			if !ok {
 				continue
 			}
+			// ★ 必须先判 InProcess：内嵌模块永远不产出二进制，绝不能走到拼
+			// cmd/plugins/<binary>/main.go 的分支（binary 为空时会拼出 cmd/plugins//main.go）。
+			if d.InProcess {
+				plan.Skipped = append(plan.Skipped, Skipped{ID: d.ID, Binary: d.Binary, Reason: ReasonInProcess})
+				continue
+			}
 			if hasSource(d) {
 				plan.Selected = append(plan.Selected, d)
 			} else {
@@ -138,8 +148,17 @@ func Build(reg *registry.Registry, mode Mode, ids []string, hasSource func(regis
 	if len(plan.Selected) == 0 && len(plan.Skipped) == 0 {
 		return plan, ErrEmptyPlan
 	}
-	if mode == ModeModules && len(plan.Skipped) > 0 {
-		return plan, noSourceError(plan.Skipped)
+	if mode == ModeModules {
+		// InProcess 是预期跳过，不是"选中了却缺源码"的错误；只有真正的缺源码才报错。
+		var noSource []Skipped
+		for _, s := range plan.Skipped {
+			if s.Reason == ReasonNoSource {
+				noSource = append(noSource, s)
+			}
+		}
+		if len(noSource) > 0 {
+			return plan, noSourceError(noSource)
+		}
 	}
 	return plan, nil
 }
@@ -165,6 +184,12 @@ func selectAllowingSkips(reg *registry.Registry, closure []string, provider map[
 		if !ok {
 			continue
 		}
+		// ★ 先判 InProcess：内嵌模块永远不产出二进制，归入预期跳过，
+		// 且不走到"检查源码是否存在"的分支。
+		if d.InProcess {
+			reason[id] = ReasonInProcess
+			continue
+		}
 		if !hasSource(d) {
 			reason[id] = ReasonNoSource
 		}
@@ -172,6 +197,8 @@ func selectAllowingSkips(reg *registry.Registry, closure []string, provider map[
 
 	// 依赖缺失传播：B 因缺源码被跳过 ⇒ 依赖 B 的 A 也跳过。重复到不动点，
 	// 以便链式处理 A→B→C（C 缺源码 ⇒ B、A 依次被跳过）。
+	// ★ InProcess 模块虽在 Skipped 里，但它是"以库形式链接进宿主"的，依赖它
+	// 视为依赖已满足，不得因此把消费者判成 missing_dep_source。
 	missDeps := make(map[string][]string)
 	for changed := true; changed; {
 		changed = false
@@ -181,7 +208,7 @@ func selectAllowingSkips(reg *registry.Registry, closure []string, provider map[
 			}
 			var miss []string
 			for _, dep := range deps[id] {
-				if _, bad := reason[dep]; bad {
+				if r, bad := reason[dep]; bad && r != ReasonInProcess {
 					miss = append(miss, dep)
 				}
 			}

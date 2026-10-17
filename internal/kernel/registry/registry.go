@@ -38,7 +38,7 @@ var (
 //   - Binary：模块进程二进制名（相对插件目录），宿主据此启动进程
 //   - Provides：本模块注册的服务名（DSH ctx.provide）
 //   - Injects：本模块需要的服务名（DSH inject）；宿主据此展开隐含依赖参与拓扑排序
-//   - HTTPBase：模块对外 HTTP 路由前缀（空 = 不提供 HTTP，如检测类后台模块）
+//   - HTTPBase：模块对外 HTTP 路由前缀（空 = 不提供 HTTP）
 //   - Enabled：是否参与装配。声明与开关放在同一处，加/减模块只动这一个文件；
 //     缺省（不写该字段）视为启用，显式 false 才停用——避免忘了写字段导致全体不启动。
 type Descriptor struct {
@@ -56,6 +56,14 @@ type Descriptor struct {
 	// ★ 与 Enabled 是两件事：core 模块同样允许 enabled=false（这次不启动），
 	//   自检只会提示"核心模块未启用"，不阻塞启动。
 	Core bool `json:"core,omitempty"`
+	// InProcess 表示该模块以库的形式链接进宿主进程，永不以独立进程运行
+	// （如 detect 检测引擎、rule 规则翻译器）。
+	// ★ 与 Core、Enabled 是三件不同的事：
+	//   InProcess = 运行形态（没有二进制，也不该有）；
+	//   Core      = 构建期不可裁剪；
+	//   Enabled   = 这次是否启动。
+	// 三者互不蕴含。
+	InProcess bool `json:"inprocess,omitempty"`
 }
 
 // IsEnabled 是否参与装配（缺省启用）。
@@ -124,7 +132,10 @@ func (r *Registry) Register(d Descriptor) error {
 	if d.ID == "" {
 		return fmt.Errorf("registry: empty id")
 	}
-	if d.Binary == "" {
+	// 内嵌模块（InProcess）不产出独立二进制，故不做"binary 默认 = id"的回退：
+	// 否则会拼出 cmd/plugins/modules.xxx/main.go 这种荒谬路径，也会让 --list 的
+	// BINARY 列显示成模块 ID。
+	if d.Binary == "" && !d.InProcess {
 		d.Binary = d.ID // 默认二进制名 = ID
 	}
 	r.mu.Lock()
@@ -149,7 +160,7 @@ func (r *Registry) Replace(d Descriptor) error {
 	if d.ID == "" {
 		return fmt.Errorf("registry: empty id")
 	}
-	if d.Binary == "" {
+	if d.Binary == "" && !d.InProcess {
 		d.Binary = d.ID
 	}
 	r.mu.Lock()

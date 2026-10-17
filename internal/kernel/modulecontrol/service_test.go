@@ -822,3 +822,37 @@ func TestSetEnabledIgnoresRuntime(t *testing.T) {
 	}
 	assertNoTempFiles(t, dir)
 }
+
+// 测试：内嵌模块（InProcess）不可单独启停，且原因优先于 core（不被 core 覆盖）。
+func TestImpactInProcess(t *testing.T) {
+	s := newTestService(t,
+		registry.Descriptor{ID: "modules.detect", InProcess: true, Layer: "L2"},
+		// 同时是 core + inprocess：原因必须仍是"内嵌"，不能被 core 的原因覆盖。
+		registry.Descriptor{ID: "modules.rule", InProcess: true, Core: true, Layer: "L1"},
+	)
+
+	imp, err := s.Impact("modules.detect")
+	if err != nil {
+		t.Fatalf("Impact(modules.detect): %v", err)
+	}
+	if !imp.InProcess {
+		t.Errorf("Impact.InProcess = false, want true: %+v", imp)
+	}
+	if imp.CanDisable {
+		t.Errorf("内嵌模块 CanDisable = true, want false: %+v", imp)
+	}
+	if !strings.Contains(imp.BlockReason, "内嵌") {
+		t.Errorf("BlockReason 应含 '内嵌': %q", imp.BlockReason)
+	}
+
+	impCore, err := s.Impact("modules.rule")
+	if err != nil {
+		t.Fatalf("Impact(modules.rule): %v", err)
+	}
+	if impCore.CanDisable {
+		t.Errorf("core+inprocess 模块 CanDisable = true, want false: %+v", impCore)
+	}
+	if !strings.Contains(impCore.BlockReason, "内嵌") {
+		t.Errorf("BlockReason 应优先说明内嵌（不能被 core 原因覆盖）: %q", impCore.BlockReason)
+	}
+}

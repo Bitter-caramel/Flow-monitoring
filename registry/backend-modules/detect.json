@@ -4,6 +4,6 @@
   "version": "0.1.0",
   "layer": "L2",
   "enabled": false,
-  "binary": "detect",
-  "provides": ["detect.feature", "alert.lifecycle"]
+  "inprocess": true,
+  "provides": ["detect.feature"]
 }

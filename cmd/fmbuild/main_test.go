@@ -42,6 +42,35 @@ func findRow(rows []string, id string) (string, bool) {
 	return "", false
 }
 
+// 测试：--list 里内嵌模块（inprocess）的 BINARY 列为 "-"、ACTION 为 skip:inprocess。
+//
+// 为什么单列一条：内嵌模块没有二进制名，若 registry 仍做"binary 默认 = id"回退，
+// BINARY 列会显示成 modules.detect，看起来像个可执行文件名，属于误导。
+func TestRun_List_InProcessRow(t *testing.T) {
+	code, stdout, stderr := runCLI(t, "--repo=../..", "--list")
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%s", code, stderr)
+	}
+	rows := listRows(stdout)
+	for _, id := range []string{"modules.detect", "modules.rule"} {
+		row, ok := findRow(rows, id)
+		if !ok {
+			t.Fatalf("未找到 %s 行\n%s", id, stdout)
+		}
+		// 列序：ID BINARY LAYER CORE ENABLED SOURCE ACTION
+		f := strings.Fields(row)
+		if len(f) < 7 {
+			t.Fatalf("%s 行列数 = %d, want >= 7: %q", id, len(f), row)
+		}
+		if f[1] != "-" {
+			t.Errorf("%s 的 BINARY 列 = %q, want %q（内嵌模块没有二进制名）", id, f[1], "-")
+		}
+		if f[6] != "skip:inprocess" {
+			t.Errorf("%s 的 ACTION = %q, want %q", id, f[6], "skip:inprocess")
+		}
+	}
+}
+
 // 测试 10：--list 全量输出 13 个模块，importer/query 两行是 build。
 func TestRun_List_AllModules(t *testing.T) {
 	code, stdout, stderr := runCLI(t, "--repo=../..", "--list")

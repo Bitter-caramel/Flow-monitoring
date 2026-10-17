@@ -213,3 +213,27 @@ func TestGuardHostDeps_RealRepo(t *testing.T) {
 		t.Errorf("真实仓库 Warnings = %+v, want none", report.Warnings)
 	}
 }
+
+// 测试 21：内嵌模块（InProcess）被宿主 import ⇒ 进 Warnings，不进 Errors
+// （内嵌模块本就是给宿主用的库，不适用"可裁剪"概念）。
+func TestGuardHostDeps_InProcessIsWarning(t *testing.T) {
+	reg := newReg(t, registry.Descriptor{ID: "modules.detect", InProcess: true})
+	edges := map[string][]string{
+		"flow-monitoring/internal/kernel/bootstrap": {"flow-monitoring/internal/modules/detect"},
+	}
+
+	report := GuardHostDeps(reg, edges)
+	if len(report.Errors) != 0 {
+		t.Errorf("Errors = %+v, want none（内嵌模块只告警）", report.Errors)
+	}
+	if len(report.Warnings) != 1 {
+		t.Fatalf("Warnings = %+v, want 1 条", report.Warnings)
+	}
+	got := report.Warnings[0]
+	if got.ModuleID != "modules.detect" {
+		t.Errorf("Warnings[0].ModuleID = %q, want modules.detect", got.ModuleID)
+	}
+	if want := []string{"flow-monitoring/internal/kernel/bootstrap"}; !reflect.DeepEqual(got.ImportedBy, want) {
+		t.Errorf("ImportedBy = %v, want %v", got.ImportedBy, want)
+	}
+}

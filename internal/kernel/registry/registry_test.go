@@ -284,3 +284,56 @@ func TestSelfCheck_RealManifests(t *testing.T) {
 	}
 	t.Logf("真实清单自检通过：core=%v enabled=%d 个 warnings=%d 条", rep.Core, len(rep.Enabled), len(rep.Warnings))
 }
+
+// TestRegister_InProcessKeepsBinaryEmpty 断言内嵌模块（InProcess）不会把 Binary
+// 回退成模块 ID。
+//
+// 为什么必须有这条：Register/Replace 里有一条老规则"binary 为空则默认 = id"，
+// 对普通模块合理；但对内嵌模块会让 hasSource 去拼
+// cmd/plugins/modules.detect/main.go 这种荒谬路径，并让 --list 的 BINARY 列
+// 显示成模块 ID（看起来像个可执行文件名）。
+func TestRegister_InProcessKeepsBinaryEmpty(t *testing.T) {
+	r := New()
+	if err := r.Register(Descriptor{ID: "modules.demo", InProcess: true}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	d, ok := r.Get("modules.demo")
+	if !ok {
+		t.Fatal("Get(modules.demo) not found")
+	}
+	if d.Binary != "" {
+		t.Errorf("InProcess 模块 Binary = %q, want 空（不得回退成 ID）", d.Binary)
+	}
+
+	// 反向对照：普通模块仍保留"binary 默认 = id"的老行为（不能被这条改动带歪）。
+	if err := r.Register(Descriptor{ID: "modules.normal"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if nd, _ := r.Get("modules.normal"); nd.Binary != "modules.normal" {
+		t.Errorf("普通模块 Binary = %q, want %q", nd.Binary, "modules.normal")
+	}
+}
+
+// TestAlertManifest_InjectsNotSelfProvided 断言真实清单里 alert 的 Injects 不含
+// 它自己 Provides 里的项（否则会形成自依赖 / 语义含混）。
+func TestAlertManifest_InjectsNotSelfProvided(t *testing.T) {
+	dir := filepath.Join("..", "..", "..", "registry", "backend-modules")
+	r, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load(%s): %v", dir, err)
+	}
+	d, ok := r.Get("modules.alert")
+	if !ok {
+		t.Fatal("Get(modules.alert) not found")
+	}
+	provided := make(map[string]bool, len(d.Provides))
+	for _, p := range d.Provides {
+		provided[p] = true
+	}
+	for _, in := range d.Injects {
+		if provided[in] {
+			t.Errorf("modules.alert 的 injects 含自己 provides 的项 %q（provides=%v injects=%v）",
+				in, d.Provides, d.Injects)
+		}
+	}
+}

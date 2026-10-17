@@ -104,6 +104,8 @@ func LoadHostDeps(repoRoot string) (map[string][]string, error) {
 //
 // 规则：对每个清单模块求包路径 p；若 p 出现在边表的**任一包的 import 列表**里，
 // 则该模块被耦合；core=false ⇒ Errors，core=true ⇒ Warnings。
+// ★ 内嵌模块（InProcess=true）本就是给宿主用的库，不适用"可裁剪"概念，一律归入
+// Warnings，不再判 Error。
 // ImportedBy = 所有直接 import 了 p 的包路径（升序）；Errors/Warnings 都按 ModuleID 升序。
 //
 // ★ edges 为 nil/空 ⇒ 返回 Checked=0 且无违规（不是错误）。
@@ -135,7 +137,7 @@ func GuardHostDeps(reg *registry.Registry, edges map[string][]string) HostGuardR
 		by = append([]string(nil), by...)
 		sort.Strings(by)
 		issue := HostDepIssue{Package: p, ModuleID: d.ID, Core: d.Core, ImportedBy: by}
-		if d.Core {
+		if d.InProcess || d.Core {
 			report.Warnings = append(report.Warnings, issue)
 		} else {
 			report.Errors = append(report.Errors, issue)

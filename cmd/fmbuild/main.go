@@ -316,12 +316,18 @@ func renderList(w io.Writer, reg *registry.Registry, plan *buildplan.Plan) {
 	fmt.Fprintln(tw, "ID\tBINARY\tLAYER\tCORE\tENABLED\tSOURCE\tACTION")
 	for _, id := range ids {
 		d := desc[id]
+		// 内嵌模块（InProcess）没有二进制名：显示 "-"，否则空列会被 tabwriter 挤成错位，
+		// 看起来像 BINARY 列里写着模块 ID。
+		bin := d.Binary
+		if bin == "" {
+			bin = "-"
+		}
 		if s, ok := skipped[id]; ok {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\tno\tskip:%s\n",
-				d.ID, d.Binary, d.Layer, yesNo(d.Core), yesNo(d.IsEnabled()), s.Reason)
+				d.ID, bin, d.Layer, yesNo(d.Core), yesNo(d.IsEnabled()), s.Reason)
 		} else {
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\tyes\tbuild\n",
-				d.ID, d.Binary, d.Layer, yesNo(d.Core), yesNo(d.IsEnabled()))
+				d.ID, bin, d.Layer, yesNo(d.Core), yesNo(d.IsEnabled()))
 		}
 	}
 	_ = tw.Flush()

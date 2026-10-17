@@ -269,3 +269,64 @@ func TestBuild_CoreOnlyAndAll(t *testing.T) {
 		t.Errorf("all Skipped = %+v, want none", all.Skipped)
 	}
 }
+
+// 测试 7：真实清单里 detect/rule 是内嵌模块（inprocess），必须 skip:inprocess、不进 Selected。
+func TestBuild_RealManifests_InProcessSkipped(t *testing.T) {
+	reg, err := registry.Load("../../registry/backend-modules")
+	if err != nil {
+		t.Fatalf("registry.Load: %v", err)
+	}
+	has := func(d registry.Descriptor) bool {
+		return d.ID == "modules.importer" || d.ID == "modules.query"
+	}
+	plan, err := Build(reg, ModeAll, nil, has)
+	if err != nil {
+		t.Fatalf("Build(ModeAll): %v", err)
+	}
+	for _, id := range []string{"modules.detect", "modules.rule"} {
+		if containsID(idsOf(plan.Selected), id) {
+			t.Errorf("%s 不应进 Selected（内嵌模块，不产出独立二进制）", id)
+		}
+		if got := skipReason(t, plan.Skipped, id); got != ReasonInProcess {
+			t.Errorf("%s reason = %q, want %q", id, got, ReasonInProcess)
+		}
+	}
+}
+
+// 测试 8：依赖一个 InProcess 模块的模块不得被判 ReasonMissingDepSource（依赖视为已满足）。
+// 用内存构造的清单，不依赖真实目录。
+func TestBuild_DependencyOnInProcessIsSatisfied(t *testing.T) {
+	reg := newReg(t,
+		registry.Descriptor{ID: "modules.consumer", Injects: []string{"detect.feature"}},
+		registry.Descriptor{ID: "modules.detect", InProcess: true, Provides: []string{"detect.feature"}},
+	)
+	has := func(d registry.Descriptor) bool { return d.ID == "modules.consumer" }
+
+	plan, err := Build(reg, ModeAll, nil, has)
+	if err != nil {
+		t.Fatalf("Build(ModeAll): %v", err)
+	}
+	if got := skipReason(t, plan.Skipped, "modules.detect"); got != ReasonInProcess {
+		t.Errorf("modules.detect reason = %q, want %q", got, ReasonInProcess)
+	}
+	if !containsID(idsOf(plan.Selected), "modules.consumer") {
+		t.Errorf("依赖 InProcess 的 modules.consumer 应被选中, Selected=%v Skipped=%+v",
+			idsOf(plan.Selected), plan.Skipped)
+	}
+	if containsID(skippedIDs(plan.Skipped), "modules.consumer") {
+		t.Errorf("modules.consumer 不应被跳过（依赖 InProcess 视为已满足）: %+v", plan.Skipped)
+	}
+
+	// ModeModules 选中一个 InProcess 模块：应在"查源码"之前就判掉，skip:inprocess，
+	// 且不得因"缺源码"报 ErrNoSource（这里 allSource 恒 true 仍应被跳过，证明判断在先）。
+	pMod, err := Build(reg, ModeModules, []string{"detect"}, allSource)
+	if err != nil {
+		t.Fatalf("Build(ModeModules detect) err = %v, want nil", err)
+	}
+	if got := skipReason(t, pMod.Skipped, "modules.detect"); got != ReasonInProcess {
+		t.Errorf("ModeModules modules.detect reason = %q, want %q", got, ReasonInProcess)
+	}
+	if containsID(idsOf(pMod.Selected), "modules.detect") {
+		t.Errorf("ModeModules 下内嵌模块不应进 Selected: %v", idsOf(pMod.Selected))
+	}
+}

@@ -6,6 +6,6 @@
   "enabled": false,
   "binary": "alert",
   "http_base": "/api/v1/alerts",
-  "provides": ["alert.api"],
-  "injects": ["situation.level", "alert.lifecycle"]
+  "provides": ["alert.api", "alert.lifecycle"],
+  "injects": ["situation.level"]
 }
