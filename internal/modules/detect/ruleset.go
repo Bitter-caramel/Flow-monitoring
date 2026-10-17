@@ -29,13 +29,15 @@ type ImportReport struct {
 	Unsupported  []string            // 不支持项汇总（已排序），形如 "flowbits x1"
 	DroppedRules []string            // 因引用引擎不支持的缓冲区而被剔除的规则，形如 "<规则ID>: <err>"
 	Notes        map[string][]string // 每条规则的备注，key = 规则 ID
+	BySource     map[string]int      // 来源 -> 成功编译条数（渲染时按 key 升序）
+	Issues       []string            // 加载期问题明细：sid 越界/重复、未知来源目录（已排序）
 }
 
 // String 把报告渲染成人类可读的分段文本。
 // 约定：
-//   - 用中文标题分段：总览 / 词法错误 / 编译失败 / 不支持项汇总 / 被剔除的规则 / 备注；
+//   - 用中文标题分段：总览 / 词法错误 / 编译失败 / 不支持项汇总 / 被剔除的规则 / 按来源统计 / 加载问题 / 备注；
 //   - 空段不打印；
-//   - 输出稳定可复现：同一份报告连续调用两次，结果完全一致（备注的 key 会先排序）。
+//   - 输出稳定可复现：同一份报告连续调用两次，结果完全一致（map 的 key 会先排序）。
 func (r *ImportReport) String() string {
 	var b strings.Builder
 	b.WriteString("========== 规则集导入报告 ==========\n")
@@ -62,6 +64,25 @@ func (r *ImportReport) String() string {
 	if len(r.DroppedRules) > 0 {
 		b.WriteString("\n[被剔除的规则]\n")
 		for _, s := range r.DroppedRules {
+			b.WriteString("  " + s + "\n")
+		}
+	}
+	if len(r.BySource) > 0 {
+		// map 的遍历顺序是随机的，必须先取出 key 并排序，保证输出可复现。
+		keys := make([]string, 0, len(r.BySource))
+		for k := range r.BySource {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		b.WriteString("\n[按来源统计]\n")
+		for _, k := range keys {
+			b.WriteString(fmt.Sprintf("  %s: %d\n", k, r.BySource[k]))
+		}
+	}
+	if len(r.Issues) > 0 {
+		b.WriteString("\n[加载问题]\n")
+		for _, s := range r.Issues {
 			b.WriteString("  " + s + "\n")
 		}
 	}
@@ -147,6 +168,8 @@ func LoadText(text string) *RuleSet {
 		CompileErrs:  make([]string, 0, len(res.CompileErrs)),
 		Unsupported:  make([]string, 0, len(res.Unsupported)),
 		DroppedRules: make([]string, 0),
+		BySource:     make(map[string]int),
+		Issues:       make([]string, 0),
 	}
 
 	// ---- 词法错误：按行号升序渲染 ----
@@ -167,6 +190,9 @@ func LoadText(text string) *RuleSet {
 	progs, dropped, compileErrs := compileRules(res.Rules)
 	report.DroppedRules = append(report.DroppedRules, dropped...)
 	report.CompileErrs = append(report.CompileErrs, compileErrs...)
+
+	// ---- 按来源统计：以真正绑定成功的 Program 为准 ----
+	report.BySource = countBySource(res.Rules, progs)
 
 	// ---- 不支持项汇总：先渲染成 "说明 xN"，再按“次数降序、说明字典序”排序 ----
 	type unsupportedEntry struct {
@@ -214,6 +240,82 @@ func LoadFile(path string) (*RuleSet, error) {
 		return nil, err
 	}
 	return LoadText(string(data)), nil
+}
+
+// LoadDir 递归加载 root 下按来源分目录的 .rules 文件并绑定进引擎。
+//
+// 与 LoadFile 的区别：
+//   - 每条规则的 Source 由其所在目录决定（见 rule.LoadDir）；
+//   - sid 号段与全局唯一性在加载期校验，问题进入 Report.Issues；
+//   - 报告按来源统计成功编译条数。
+//
+// 目录不存在等致命错误不会 panic：错误会进入 Issues，并返回空规则集，
+// 让调用方仍能展示一份可读报告。
+func LoadDir(root string) (*RuleSet, *ImportReport) {
+	crs, issues, err := rule.LoadDir(root)
+
+	report := &ImportReport{
+		Total:        len(crs),
+		Notes:        make(map[string][]string),
+		LexErrors:    make([]string, 0),
+		CompileErrs:  make([]string, 0),
+		Unsupported:  make([]string, 0),
+		DroppedRules: make([]string, 0),
+		BySource:     make(map[string]int),
+		Issues:       make([]string, 0, len(issues)+1),
+	}
+	for _, is := range issues {
+		report.Issues = append(report.Issues, fmt.Sprintf("%s: %s", is.File, is.Reason))
+	}
+	if err != nil {
+		report.Issues = append(report.Issues, fmt.Sprintf("加载规则目录失败: %v", err))
+		sort.Strings(report.Issues)
+		rs := &RuleSet{Programs: make([]*Program, 0), Report: report}
+		return rs, report
+	}
+
+	// 复用 LoadFile / LoadText 的绑定期逻辑。
+	progs, dropped, compileErrs := compileRules(crs)
+	report.DroppedRules = append(report.DroppedRules, dropped...)
+	report.CompileErrs = append(report.CompileErrs, compileErrs...)
+	report.BySource = countBySource(crs, progs)
+
+	for _, p := range progs {
+		if len(p.Unsupported) == 0 {
+			continue
+		}
+		report.Notes[p.ID] = append(report.Notes[p.ID], p.Unsupported...)
+	}
+
+	report.Compiled = len(progs)
+	report.Failed = report.Total - report.Compiled
+
+	sort.Strings(report.Issues)
+
+	rs := &RuleSet{Programs: progs, Report: report}
+	return rs, report
+}
+
+// countBySource 统计真正绑定成功的 Program 按来源的条数。
+//
+// Program 本身不保留 Source（引擎不需要），因此通过 ID 回到 CompiledRule
+// 取来源。ID 在加载期已保证唯一（sid 全局去重）。
+func countBySource(crs []*rule.CompiledRule, progs []*Program) map[string]int {
+	idSource := make(map[string]rule.Source, len(crs))
+	for _, cr := range crs {
+		if cr == nil {
+			continue
+		}
+		idSource[cr.ID] = cr.Source
+	}
+	out := make(map[string]int)
+	for _, p := range progs {
+		if p == nil {
+			continue
+		}
+		out[string(idSource[p.ID])]++
+	}
+	return out
 }
 
 // compileRules 逐条编译规则。

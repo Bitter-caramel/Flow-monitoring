@@ -11,9 +11,10 @@ package rule
 type Source string
 
 const (
-	SourceSuricata Source = "suricata" // 由 Suricata 规则导入
+	SourceSuricata Source = "suricata" // 由 Suricata 规则导入（ET 等社区规则）
 	SourceBuiltin  Source = "builtin"  // 项目内置规则
-	SourceCustom   Source = "custom"   // 管理员自定义
+	SourceCustom   Source = "custom"   // 管理员本地自写规则
+	SourcePublic   Source = "public"   // 本项目对外发布的公共规则集
 )
 
 // Protocol 规则限定的协议。
