@@ -25,6 +25,7 @@ import { TopBar } from './TopBar'
 import { StatusBar } from './StatusBar'
 import { useAppStatus } from './useAppStatus'
 import { useActivePanel } from './useActivePanel'
+import { PanelErrorBoundary } from './ErrorBoundary'
 
 export function App() {
   // ★ 当前面板来自 URL（hash 路由，URL 是唯一数据源）：刷新保持、可分享、可前进后退。
@@ -45,7 +46,11 @@ export function App() {
 
         <main className="min-w-0 flex-1 overflow-auto p-4">
           {ActiveComponent ? (
-            <ActiveComponent />
+            // ★ 面板级错误边界：任何一个面板渲染崩溃都只影响它自己，不许把整个控制台打白。
+            //   key=activeId ⇒ 切面板时边界重建、错误状态自动复位。
+            <PanelErrorBoundary key={activeId} label={active?.manifest.name}>
+              <ActiveComponent />
+            </PanelErrorBoundary>
           ) : (
             <div className="flex h-full items-center justify-center text-dim">请注册至少一个面板</div>
           )}

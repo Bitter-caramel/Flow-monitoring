@@ -49,11 +49,24 @@ export async function importCapture(file: File, name?: string): Promise<CaptureR
   return resp.json()
 }
 
+/**
+ * ★ Go ↔ JS 契约坑（2026-10-17 实测踩到）：Go 的 **nil slice 会被编码成 JSON `null`**，
+ * 而后端"查不到行"时就是 nil ⇒ `{"items":null,"total":-1}`。前端若直接 `items.length`
+ * 会抛 `TypeError: Cannot read properties of null (reading 'length')`，
+ * ★ 而且会把整个控制台打成白屏（面板崩 + 无 error boundary）。
+ * ⇒ 所有分页接口统一在这里归一化：items 一定是数组，total 一定是非负数。
+ */
+function normalizePage<T>(raw: PageResult<T>): PageResult<T> {
+  const items = Array.isArray(raw.items) ? raw.items : []
+  const total = typeof raw.total === 'number' && raw.total >= 0 ? raw.total : items.length
+  return { ...raw, items, total }
+}
+
 /** 列出 captures。 */
 export async function listCaptures(offset = 0, limit = 50): Promise<PageResult<CaptureRecord>> {
   const resp = await fetch(`/api/v1/captures?offset=${offset}&limit=${limit}`)
   if (!resp.ok) throw new Error(await resp.text())
-  return resp.json()
+  return normalizePage<CaptureRecord>(await resp.json())
 }
 
 /** 列出某 capture 的包。 */
@@ -66,7 +79,7 @@ export async function listPackets(
     `/api/v1/captures/${captureId}/packets?offset=${offset}&limit=${limit}`,
   )
   if (!resp.ok) throw new Error(await resp.text())
-  return resp.json()
+  return normalizePage<PacketRecord>(await resp.json())
 }
 
 /**
@@ -136,4 +149,40 @@ export function listModules(timeoutMs = 3000): Promise<ModuleView[]> {
 /** 读取后端自检报告（GET /api/modules/selfcheck）。 */
 export function getSelfCheck(timeoutMs = 3000): Promise<SelfCheckReport> {
   return getJSON<SelfCheckReport>('/api/modules/selfcheck', timeoutMs)
+}
+
+/**
+ * 模块拓扑图节点（GET /api/modules/graph 的 nodes[]）。
+ * layer 取值 "L0"|"L1"|"L2"|"L3"；state 取值 "started"|"stopped"|"error"|"unknown"。
+ */
+export interface GraphNode {
+  id: string
+  name: string
+  version: string
+  layer: string
+  core: boolean
+  enabled: boolean
+  provides: string[]
+  injects: string[]
+  http_base?: string
+  binary?: string
+  state: string
+}
+
+/** 模块拓扑图边：from 消费者 → to 提供者；via 形如 "provides:<能力名>"。 */
+export interface GraphEdge {
+  from: string
+  to: string
+  via: string
+}
+
+/** 模块拓扑图（GET /api/modules/graph）。 */
+export interface ModuleGraph {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+}
+
+/** 读取模块拓扑图（GET /api/modules/graph）。 */
+export function fetchModulesGraph(timeoutMs = 3000): Promise<ModuleGraph> {
+  return getJSON<ModuleGraph>('/api/modules/graph', timeoutMs)
 }

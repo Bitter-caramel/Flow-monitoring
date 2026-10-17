@@ -12,6 +12,7 @@ import { App } from './shell/App'
 // 新增面板只需在此追加一行 import，无需改 shell
 import './panels/capture-import'
 import './panels/packet-list'
+import './panels/module-graph'
 
 // ★ 首帧前应用主题/密度：从 localStorage 读取已存偏好（键名见 shell/theme.ts：
 //   fm.theme / fm.density），写入 documentElement.dataset，避免"先深后浅"的闪烁（FOUC）。
