@@ -41,6 +41,9 @@ var (
 	ErrNotFound = errors.New("modulecontrol: 模块不存在")
 	// ErrCoreModule 核心模块不可禁用。
 	ErrCoreModule = errors.New("modulecontrol: 核心模块不可禁用")
+	// ErrInProcessModule 内嵌模块不可启停。
+	// 内嵌模块随宿主进程运行，没有独立进程可启停，写 enabled 无意义。
+	ErrInProcessModule = errors.New("modulecontrol: 内嵌模块不可启停")
 )
 
 // Options 构造选项。
@@ -271,6 +274,7 @@ func (s *Service) Impact(id string) (Impact, error) {
 // SetEnabled 把 enabled 写回清单。
 //
 //   - id 不存在 ⇒ ErrNotFound（写前先重新 Load 确认，反映磁盘最新状态）
+//   - 模块是 inprocess ⇒ ErrInProcessModule（不区分启用/停用，且不写文件）
 //   - enabled=false 且模块是 core ⇒ ErrCoreModule，且不写文件
 //   - 否则原子重写该模块对应的清单文件（临时文件 + os.Rename），末尾带换行
 //
@@ -283,6 +287,11 @@ func (s *Service) SetEnabled(id string, enabled bool) (ChangeResult, error) {
 	d, ok := reg.Get(id)
 	if !ok {
 		return ChangeResult{}, ErrNotFound
+	}
+	// ★ 先判内嵌再判 core（与 Impact 里 InProcess → Core 的顺序一致）：
+	// 内嵌模块随宿主进程运行，没有独立进程可启停，写 enabled 无意义——两个方向都拦。
+	if d.InProcess {
+		return ChangeResult{}, ErrInProcessModule
 	}
 	if !enabled && d.Core {
 		return ChangeResult{}, ErrCoreModule

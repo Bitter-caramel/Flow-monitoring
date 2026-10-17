@@ -233,6 +233,8 @@ export interface GraphNode {
   binary?: string
   /** 插件目录里是否有可执行文件；false ⇒ 无法启用 */
   has_binary: boolean
+  /** 是否以库形式内嵌进宿主进程（永无独立进程）：true ⇒ 不可单独启停 */
+  inprocess: boolean
   state: string
 }
 
@@ -271,6 +273,8 @@ export interface ModuleImpact {
   dependents: string[]
   /** 插件目录里是否存在该模块的可执行文件（与运行期找二进制的规则一致）。 */
   has_binary: boolean
+  /** 是否以库形式内嵌进宿主进程：true ⇒ 随宿主运行，不可单独启停。 */
+  inprocess: boolean
   can_disable: boolean
   block_reason?: string
 }
@@ -306,6 +310,7 @@ function normalizeImpact(raw: ModuleImpact): ModuleImpact {
     ...raw,
     dependents: Array.isArray(raw.dependents) ? raw.dependents : [],
     has_binary: !!raw.has_binary,
+    inprocess: raw.inprocess === true,
     can_disable: raw.can_disable === true,
   }
 }

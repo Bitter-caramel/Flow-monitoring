@@ -254,6 +254,32 @@ func TestModulesAPI(t *testing.T) {
 		}
 	})
 
+	t.Run("6b_enable_inprocess_409_no_write", func(t *testing.T) {
+		// 内嵌模块没有独立进程可启停：后端必须拒绝，且状态码是 409（语义拒绝）
+		// 而不是 500（服务器内部错误）——否则会被误读成"服务坏了"。
+		ds := []registry.Descriptor{
+			{ID: "mod.embed", Layer: "L1", InProcess: true},
+			{ID: "mod.a", Layer: "L1"},
+		}
+		s, dir := newAPIServer(t, ds, nil)
+		path := filepath.Join(dir, "mod.embed.json")
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("读清单: %v", err)
+		}
+		status, body := do(t, s, http.MethodPost, "/api/modules/mod.embed/enable")
+		if status != http.StatusConflict {
+			t.Fatalf("内嵌模块 enable status = %d, want 409; body=%s", status, body)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("读清单: %v", err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Errorf("内嵌模块 enable 被拒后清单不应被改")
+		}
+	})
+
 	t.Run("7_disable_cascade_applied", func(t *testing.T) {
 		ds := []registry.Descriptor{
 			{ID: "mod.a", Layer: "L1"},

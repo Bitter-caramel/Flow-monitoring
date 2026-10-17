@@ -169,10 +169,11 @@ func dryRun(r *http.Request) (bool, error) {
 
 // writeErr 统一错误映射：
 //
-//	ErrNotFound   ⇒ 404
-//	ErrCoreModule ⇒ 409
-//	参数错         ⇒ 400
-//	其它           ⇒ 500
+//	ErrNotFound        ⇒ 404
+//	ErrCoreModule      ⇒ 409
+//	ErrInProcessModule ⇒ 409（内嵌模块没有独立进程可启停，属语义拒绝，不是服务器错误）
+//	参数错              ⇒ 400
+//	其它                ⇒ 500
 //
 // ★ 一律用 errors.Is 判定，绝不匹配错误文本；响应体统一为 {"error": ...}。
 func writeErr(w http.ResponseWriter, err error) {
@@ -181,6 +182,8 @@ func writeErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, modulecontrol.ErrNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, modulecontrol.ErrCoreModule):
+		status = http.StatusConflict
+	case errors.Is(err, modulecontrol.ErrInProcessModule):
 		status = http.StatusConflict
 	case errors.Is(err, errBadRequest):
 		status = http.StatusBadRequest

@@ -361,6 +361,58 @@ func TestSetEnabled(t *testing.T) {
 	assertNoTempFiles(t, dir)
 }
 
+// TestSetEnabledInProcess 守的是"内嵌模块两个方向都拦，且不写坏清单"。
+//
+// 内嵌模块（inprocess）随宿主进程运行，没有独立进程可启停，写 enabled 无意义。
+// SetEnabled 必须对 enabled=true / false 两个方向都返回 ErrInProcessModule，
+// 且磁盘上的清单字节原样不动。
+func TestSetEnabledInProcess(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "detect.json", registry.Descriptor{ID: "modules.detect", InProcess: true, Layer: "L1"})
+	writeManifest(t, dir, "x.json", registry.Descriptor{ID: "mod.x", Layer: "L2", Enabled: boolPtr(false)})
+
+	s, err := New(Options{ManifestDir: dir})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	detectPath := filepath.Join(dir, "detect.json")
+	before, err := os.ReadFile(detectPath)
+	if err != nil {
+		t.Fatalf("读 detect.json: %v", err)
+	}
+
+	// (a) 启用方向 ⇒ ErrInProcessModule。
+	if _, err := s.SetEnabled("modules.detect", true); !errors.Is(err, ErrInProcessModule) {
+		t.Fatalf("SetEnabled(modules.detect,true) err = %v, want ErrInProcessModule", err)
+	}
+	// (b) 停用方向同样拦 ⇒ ErrInProcessModule。
+	if _, err := s.SetEnabled("modules.detect", false); !errors.Is(err, ErrInProcessModule) {
+		t.Fatalf("SetEnabled(modules.detect,false) err = %v, want ErrInProcessModule", err)
+	}
+	// (c) 两个方向都试过之后磁盘字节仍未变。
+	after, err := os.ReadFile(detectPath)
+	if err != nil {
+		t.Fatalf("重读 detect.json: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("内嵌模块文件被意外修改")
+	}
+	assertNoTempFiles(t, dir)
+
+	// (d) 回归对照：普通非 core 模块的 SetEnabled 行为保持不变。
+	if _, err := s.SetEnabled("mod.x", true); err != nil {
+		t.Fatalf("SetEnabled(mod.x,true): %v", err)
+	}
+	reg, err := registry.Load(dir)
+	if err != nil {
+		t.Fatalf("重新 Load: %v", err)
+	}
+	if d, ok := reg.Get("mod.x"); !ok || !d.IsEnabled() {
+		t.Errorf("mod.x.IsEnabled() = %v, want true", d.IsEnabled())
+	}
+}
+
 // ------------------------- 5. round-trip 守卫（只读真实清单） -------------------------
 
 // ------------------------- 6. 就地改值（★ 只改 enabled 的值，其余字节原样） -------------------------
@@ -459,6 +511,9 @@ func TestSetEnabledRealManifestsRoundTrip(t *testing.T) {
 	for _, v := range views {
 		if v.Core {
 			continue // 核心模块禁止禁用，跳过（另有用例覆盖）
+		}
+		if v.InProcess {
+			continue // 内嵌模块随宿主运行，setenabled 两方向都被拦（另有用例覆盖）
 		}
 		path, err := svc.manifestFileForID(v.ID)
 		if err != nil {

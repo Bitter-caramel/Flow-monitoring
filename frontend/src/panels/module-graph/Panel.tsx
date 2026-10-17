@@ -19,6 +19,9 @@ interface PendingAction {
   stop: boolean
 }
 
+/** 内嵌模块的兜底理由：后端 impact.block_reason 取不到时用这句。 */
+const INPROCESS_BLOCK_FALLBACK = '内嵌于宿主进程：随宿主运行，没有独立进程可启停'
+
 /**
  * 模块拓扑面板。
  *
@@ -40,6 +43,8 @@ export function ModuleGraphPanel() {
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState('')
   const [result, setResult] = useState<CascadeResult | null>(null)
+  // 内嵌模块按钮常禁，但仍要取 impact 拿后端 block_reason（优先展示后端文案）。
+  const [inprocessBlockReason, setInprocessBlockReason] = useState('')
   // 防止“先点 A 再点 B”时 A 的 impact 晚到，覆盖 B 的弹窗。
   const actionSeq = useRef(0)
 
@@ -63,6 +68,28 @@ export function ModuleGraphPanel() {
       cancelled = true
     }
   }, [reloadKey])
+
+  // 内嵌模块：按钮常禁，但仍要发 impact 请求拿后端 block_reason（禁用按钮点不动，
+  // 不能靠点击触发，故按选中项变化按需拉取）。取不到时后端文案为空，用前端常量兜底。
+  const selectedInProcess =
+    graph?.nodes.find((n) => n.id === selectedId)?.inprocess === true
+  useEffect(() => {
+    if (!selectedInProcess) {
+      setInprocessBlockReason('')
+      return
+    }
+    let cancelled = false
+    fetchModuleImpact(selectedId)
+      .then((impact) => {
+        if (!cancelled) setInprocessBlockReason(impact.block_reason || '')
+      })
+      .catch(() => {
+        if (!cancelled) setInprocessBlockReason('')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [selectedId, selectedInProcess])
 
   /** 切换选中节点：作废未完成的 impact 请求，并清空上一个动作的结果/错误。 */
   function handleSelect(id: string) {
@@ -162,8 +189,14 @@ export function ModuleGraphPanel() {
   const edges = graph?.edges ?? []
   const selected = nodes.find((n) => n.id === selectedId) ?? null
   // 启用方向且插件目录里没有该模块的二进制：只警告，不禁止确认。
+  // 内嵌模块根本不该被启用（按钮已禁用），不显示这条警告。
   const enableWithoutBinary =
-    pending !== null && !pending.stop && pending.impact.has_binary === false
+    pending !== null &&
+    !pending.stop &&
+    !pending.node.inprocess &&
+    pending.impact.has_binary === false
+  // 内嵌模块禁用理由：优先后端 block_reason，取不到用前端常量。
+  const inprocessReason = inprocessBlockReason || INPROCESS_BLOCK_FALLBACK
 
   return (
     <div className="flex h-full min-h-0 gap-3">
@@ -205,6 +238,7 @@ export function ModuleGraphPanel() {
               checking={checking}
               error={actionError}
               result={result}
+              inprocessBlockReason={inprocessReason}
               onAction={beginAction}
             />
           </div>
@@ -267,10 +301,15 @@ function NodeDetail({ node }: { node: GraphNode }) {
       <DetailRow label="injects" value={injects} />
       <DetailRow label="http_base" value={node.http_base || '-'} />
       <DetailRow label="binary" value={node.binary || '-'} />
-      <DetailRow label="可执行文件" value={node.has_binary ? '有' : '无'} />
-      {!node.has_binary && (
+      <DetailRow
+        label="可执行文件"
+        value={node.inprocess ? '内嵌（随宿主）' : node.has_binary ? '有' : '无'}
+      />
+      {node.inprocess ? (
+        <div className="text-warn text-xs">内嵌于宿主进程：没有独立二进制，也不可单独启停</div>
+      ) : !node.has_binary ? (
         <div className="text-warn text-xs">无法启用（需先有 bin/plugins/{node.binary || '<binary>'}）</div>
-      )}
+      ) : null}
     </div>
   )
 }
@@ -290,17 +329,27 @@ function ActionArea({
   checking,
   error,
   result,
+  inprocessBlockReason,
   onAction,
 }: {
   node: GraphNode
   checking: boolean
   error: string
   result: CascadeResult | null
+  inprocessBlockReason: string
   onAction: (node: GraphNode) => void
 }) {
   const stop = node.enabled
+  // 内嵌模块随宿主进程运行，没有独立进程可启停：启用/停用两个方向都禁用。
+  const inprocessBlocked = node.inprocess
   // core 绝不可停：只有“停用”方向需要拦住；若 core 意外处于 disabled，允许启用回来。
   const coreBlocked = node.core && stop
+  const buttonDisabled = checking || inprocessBlocked || coreBlocked
+  const buttonTitle = inprocessBlocked
+    ? inprocessBlockReason || '内嵌模块不可单独启停'
+    : coreBlocked
+      ? '核心模块不可停用'
+      : undefined
   const buttonClass = stop
     ? 'bg-danger text-accent-fg hover:opacity-90'
     : 'bg-accent text-accent-fg hover:opacity-90'
@@ -310,14 +359,17 @@ function ActionArea({
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          disabled={checking || coreBlocked}
-          title={coreBlocked ? '核心模块不可停用' : undefined}
+          disabled={buttonDisabled}
+          title={buttonTitle}
           onClick={() => onAction(node)}
           className={`rounded-sm px-3 py-1.5 text-base disabled:cursor-not-allowed disabled:opacity-50 ${buttonClass}`}
         >
           {stop ? '停用' : '启用'}
         </button>
         {checking && <span className="text-sm text-dim">正在获取影响面…</span>}
+        {inprocessBlocked && (
+          <span className="text-sm text-warn">{inprocessBlockReason || '内嵌模块不可单独启停'}</span>
+        )}
         {coreBlocked && <span className="text-sm text-warn">核心模块不可停用</span>}
       </div>
 
