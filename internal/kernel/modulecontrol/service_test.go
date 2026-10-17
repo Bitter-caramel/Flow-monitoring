@@ -246,6 +246,49 @@ func TestImpactCoreDependent(t *testing.T) {
 	}
 }
 
+func TestImpactHasBinary(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "yes.json", registry.Descriptor{ID: "mod.yes", Binary: "yes-bin"})
+	writeManifest(t, dir, "no.json", registry.Descriptor{ID: "mod.no", Binary: "no-bin"})
+
+	s, err := New(Options{
+		ManifestDir:   dir,
+		BinaryChecker: func(binary string) bool { return binary == "yes-bin" },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	impYes, err := s.Impact("mod.yes")
+	if err != nil {
+		t.Fatalf("Impact(mod.yes): %v", err)
+	}
+	if !impYes.HasBinary {
+		t.Errorf("mod.yes 有二进制时 HasBinary = false, want true: %+v", impYes)
+	}
+
+	impNo, err := s.Impact("mod.no")
+	if err != nil {
+		t.Fatalf("Impact(mod.no): %v", err)
+	}
+	if impNo.HasBinary {
+		t.Errorf("mod.no 无二进制时 HasBinary = true, want false: %+v", impNo)
+	}
+
+	// 未注入 BinaryChecker（nil）：不可判定，只填 false，且不得 panic。
+	sNil, err := New(Options{ManifestDir: dir})
+	if err != nil {
+		t.Fatalf("New(nil checker): %v", err)
+	}
+	impNil, err := sNil.Impact("mod.yes")
+	if err != nil {
+		t.Fatalf("Impact(mod.yes) with nil checker: %v", err)
+	}
+	if impNil.HasBinary {
+		t.Errorf("BinaryChecker 为 nil 时 HasBinary = true, want false: %+v", impNil)
+	}
+}
+
 // ------------------------- 4. SetEnabled -------------------------
 
 func TestSetEnabled(t *testing.T) {

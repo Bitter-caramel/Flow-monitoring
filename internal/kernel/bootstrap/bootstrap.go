@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -155,7 +156,20 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 
 	// 控制面：唯一行为实现（modulecontrol）+ 运行期后端（pluginhost，StopTimeout<=0 用默认值）。
 	// 此时 reg 与 mgr 均已建好（mgr 在上方 Start、reg 在清单加载处），故在此注入。
-	mctl, err := modulecontrol.New(modulecontrol.Options{ManifestDir: cfg.ManifestDir, Logger: logger})
+	mctl, err := modulecontrol.New(modulecontrol.Options{
+		ManifestDir: cfg.ManifestDir,
+		Logger:      logger,
+		// 与 pluginhost.Manager.Launch 完全相同的拼路径规则：
+		// PluginDir + 清单 binary（Windows 再加 .exe）。只做只读 os.Stat。
+		BinaryChecker: func(binary string) bool {
+			bin := filepath.Join(cfg.PluginDir, binary)
+			if runtime.GOOS == "windows" {
+				bin += ".exe"
+			}
+			_, statErr := os.Stat(bin)
+			return statErr == nil
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap: module control: %w", err)
 	}

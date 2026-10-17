@@ -267,6 +267,8 @@ export interface ModuleImpact {
   id: string
   core: boolean
   dependents: string[]
+  /** 插件目录里是否存在该模块的可执行文件（与运行期找二进制的规则一致）。 */
+  has_binary: boolean
   can_disable: boolean
   block_reason?: string
 }
@@ -301,6 +303,7 @@ function normalizeImpact(raw: ModuleImpact): ModuleImpact {
   return {
     ...raw,
     dependents: Array.isArray(raw.dependents) ? raw.dependents : [],
+    has_binary: !!raw.has_binary,
     can_disable: raw.can_disable === true,
   }
 }

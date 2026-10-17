@@ -50,6 +50,11 @@ type Options struct {
 	Runtime     RuntimeBackend  // ★ 可选：nil = 只改清单（12-2 行为）
 	StopTimeout time.Duration   // ★ 可选：单模块停止超时（默认 DefaultStopTimeout=10s）
 	AuditSink   AuditSink       // ★ 可选：nil = 不写审计
+	// BinaryChecker 判定"插件目录里是否存在该模块的可执行文件"。
+	// binary 是清单里的 Binary（registry 已兜底为模块 ID），实现方负责按
+	// pluginhost 的拼路径规则（PluginDir + binary + Windows 后缀）判存在性。
+	// ★ nil = 不可判定：Impact.HasBinary 一律填 false（不 panic、不猜测）。
+	BinaryChecker func(binary string) bool
 }
 
 // ModuleView 给入口展示的模块视图。
@@ -87,9 +92,13 @@ type Impact struct {
 	Core bool   `json:"core"`
 	// Dependents 是直接或间接依赖它的模块，按关闭顺序给出（最先被关的消费者在前，
 	// target 本身不在列表里）。确定性排序。
-	Dependents  []string `json:"dependents"`
-	CanDisable  bool     `json:"can_disable"`
-	BlockReason string   `json:"block_reason,omitempty"` // CanDisable=false 时说明原因
+	Dependents []string `json:"dependents"`
+	// HasBinary 表示插件目录里存在该模块的可执行文件（与 pluginhost 启动时
+	// 拼路径的规则一致）。false 只代表"没找到二进制"，不阻止写 enabled=true，
+	// 但界面必须在启用前如实告知用户。
+	HasBinary   bool   `json:"has_binary"`
+	CanDisable  bool   `json:"can_disable"`
+	BlockReason string `json:"block_reason,omitempty"` // CanDisable=false 时说明原因
 }
 
 // ChangeResult 一次 enable/disable 的结果。
@@ -107,6 +116,8 @@ type Service struct {
 	runtime     RuntimeBackend // ★ 可选：nil = 只改清单（12-2 行为）
 	stopTimeout time.Duration  // ★ 单模块停止超时；New 时兜底为 DefaultStopTimeout
 	audit       AuditSink      // ★ 可选：nil = 不写审计
+	// binaryChecker 判定插件二进制是否存在；nil = 不可判定（Impact.HasBinary 恒 false）。
+	binaryChecker func(binary string) bool
 }
 
 // New 构造服务：校验并加载清单目录。
@@ -133,7 +144,15 @@ func New(opts Options) (*Service, error) {
 	if timeout <= 0 {
 		timeout = DefaultStopTimeout
 	}
-	return &Service{dir: dir, logger: opts.Logger, reg: reg, runtime: opts.Runtime, stopTimeout: timeout, audit: opts.AuditSink}, nil
+	return &Service{
+		dir:           dir,
+		logger:        opts.Logger,
+		reg:           reg,
+		runtime:       opts.Runtime,
+		stopTimeout:   timeout,
+		audit:         opts.AuditSink,
+		binaryChecker: opts.BinaryChecker,
+	}, nil
 }
 
 // List 列出全部模块视图（按 ID 升序）。
@@ -202,7 +221,11 @@ func (s *Service) Impact(id string) (Impact, error) {
 	if order == nil {
 		order = []string{}
 	}
-	imp := Impact{ID: id, Core: d.Core, Dependents: order}
+	hasBinary := false
+	if s.binaryChecker != nil {
+		hasBinary = s.binaryChecker(d.Binary)
+	}
+	imp := Impact{ID: id, Core: d.Core, Dependents: order, HasBinary: hasBinary}
 
 	if d.Core {
 		imp.CanDisable = false

@@ -159,6 +159,9 @@ export function ModuleGraphPanel() {
   const nodes = graph?.nodes ?? []
   const edges = graph?.edges ?? []
   const selected = nodes.find((n) => n.id === selectedId) ?? null
+  // 启用方向且插件目录里没有该模块的二进制：只警告，不禁止确认。
+  const enableWithoutBinary =
+    pending !== null && !pending.stop && pending.impact.has_binary === false
 
   return (
     <div className="flex h-full min-h-0 gap-3">
@@ -209,7 +212,7 @@ export function ModuleGraphPanel() {
       <ConfirmDialog
         open={pending !== null}
         title={pending ? `${pending.stop ? '停用' : '启用'} ${pending.node.name}` : ''}
-        confirmLabel={pending?.stop ? '确认停用' : '确认启用'}
+        confirmLabel={pending?.stop ? '确认停用' : enableWithoutBinary ? '仍要启用' : '确认启用'}
         danger={pending?.stop ?? false}
         busy={busy}
         confirmDisabled={pending ? pending.stop && !pending.impact.can_disable : false}
@@ -232,7 +235,16 @@ export function ModuleGraphPanel() {
             )}
           </>
         )}
-        {pending && !pending.stop && <p>将启动该模块（只启动它自己，不级联启动依赖者）。</p>}
+        {pending && !pending.stop && (
+          <>
+            {pending.impact.has_binary === false && (
+              <p className="text-warn">
+                该模块没有可执行文件（插件目录里没有它的二进制），启用后无法启动；确认仍要写入 enabled=true 吗？
+              </p>
+            )}
+            <p>将启动该模块（只启动它自己，不级联启动依赖者）。</p>
+          </>
+        )}
       </ConfirmDialog>
     </div>
   )
