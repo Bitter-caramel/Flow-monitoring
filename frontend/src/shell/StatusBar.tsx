@@ -15,8 +15,8 @@
  *   右上角提供手动刷新。
  */
 import type { ReactNode } from 'react'
-import type { AppStatus } from './useAppStatus'
-import type { SelfCheckReport } from '../api'
+import type { AppStatus, ConnectionState } from './useAppStatus'
+import type { HealthStorage, SelfCheckReport } from '../api'
 
 interface StatusBarProps {
   status: AppStatus
@@ -40,8 +40,35 @@ function selfCheckView(report: SelfCheckReport | null): ReactNode {
   )
 }
 
+/**
+ * 存储健康文案（B2，常驻项）。
+ *   - 未知 / 整体 offline ⇒ `存储 ?`（dim）—— offline 时绝不显示假 ✓；
+ *   - available=true    ⇒ `存储 ✓`（--ok 语义色）；
+ *   - available=false   ⇒ 红色 `存储不可用`（--danger），title 给 err。
+ */
+function storageView(state: ConnectionState, storage: HealthStorage | null): ReactNode {
+  if (state !== 'online' || storage === null) {
+    return <span className="text-dim">存储 ?</span>
+  }
+  if (storage.available) {
+    return <span className="text-ok">存储 ✓</span>
+  }
+  return (
+    <span className="text-danger" title={storage.err || '数据库未连接'}>
+      存储不可用
+    </span>
+  )
+}
+
+/** 本地 HH:MM:SS（自己格式化：不用受 locale 影响的 toLocale* API）。 */
+function fmtClock(ms: number): string {
+  const d = new Date(ms)
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+}
+
 export function StatusBar({ status }: StatusBarProps) {
-  const { state, modules, selfcheck, error, lastUpdated, refreshing, refresh } = status
+  const { state, modules, selfcheck, storage, error, lastUpdated, refreshing, refresh } = status
 
   let main: ReactNode
   if (state === 'loading') {
@@ -69,10 +96,12 @@ export function StatusBar({ status }: StatusBarProps) {
   return (
     <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-subtle bg-panel px-3 text-xs text-muted">
       {main}
+      <span className="text-dim">·</span>
+      {storageView(state, storage)}
       <div className="ml-auto flex items-center gap-3">
         {lastUpdated !== null && (
           <span className="mono text-dim" title="上次成功读取后端的时刻">
-            {new Date(lastUpdated).toLocaleTimeString('zh-CN', { hour12: false })}
+            {fmtClock(lastUpdated)}
           </span>
         )}
         <button

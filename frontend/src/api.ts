@@ -152,6 +152,30 @@ export function getSelfCheck(timeoutMs = 3000): Promise<SelfCheckReport> {
 }
 
 /**
+ * 存储健康（GET /healthz 的 storage 字段）。
+ *
+ * available=false 时 err 说明原因（如数据库未连接）；last_check/interval_seconds
+ * 用于状态栏 tooltip 或排障，缺省时忽略即可。
+ */
+export interface HealthStorage {
+  available: boolean
+  err?: string
+  last_check?: string
+  interval_seconds?: number
+}
+
+/** 后端总体健康（GET /healthz）。storage 可能缺省（旧后端 / 读取失败时）。 */
+export interface Health {
+  status: string
+  storage?: HealthStorage
+}
+
+/** 读取后端健康状态（GET /healthz）。复用 getJSON 的 3s 超时封装。 */
+export function fetchHealth(timeoutMs = 3000): Promise<Health> {
+  return getJSON<Health>('/healthz', timeoutMs)
+}
+
+/**
  * 模块拓扑图节点（GET /api/modules/graph 的 nodes[]）。
  * layer 取值 "L0"|"L1"|"L2"|"L3"；state 取值 "started"|"stopped"|"error"|"unknown"。
  */

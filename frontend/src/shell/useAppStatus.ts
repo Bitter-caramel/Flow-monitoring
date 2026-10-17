@@ -18,8 +18,10 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  fetchHealth,
   getSelfCheck,
   listModules,
+  type HealthStorage,
   type ModuleView,
   type SelfCheckReport,
 } from '../api'
@@ -34,6 +36,10 @@ export interface AppStatus {
   modules: ModuleView[]
   /** 仅 online 时非空。 */
   selfcheck: SelfCheckReport | null
+  /** 存储健康（GET /healthz）；拿不到（失败/缺省）时为 null。 */
+  storage: HealthStorage | null
+  /** 存储健康被读取/检查的时刻（ISO）；未拿到为 undefined。 */
+  storageCheckedAt?: string
   /** offline 时的错误摘要（顶栏/状态栏 tooltip 用）。 */
   error: string
   /** 上次成功读取后端的时刻（ms epoch）；未成功为 null。 */
@@ -49,6 +55,8 @@ export function useAppStatus(): AppStatus {
   const [state, setState] = useState<ConnectionState>('loading')
   const [modules, setModules] = useState<ModuleView[]>([])
   const [selfcheck, setSelfcheck] = useState<SelfCheckReport | null>(null)
+  const [storage, setStorage] = useState<HealthStorage | null>(null)
+  const [storageCheckedAt, setStorageCheckedAt] = useState<string | undefined>(undefined)
   const [error, setError] = useState('')
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
   const [refreshing, setRefreshing] = useState(false)
@@ -58,11 +66,29 @@ export function useAppStatus(): AppStatus {
     const seq = ++seqRef.current
     setRefreshing(true)
     try {
-      // 两个接口并发；任一失败即整体判为未连接（Promise.all 快速失败）。
-      const [mods, report] = await Promise.all([listModules(3000), getSelfCheck(3000)])
+      // 三个接口并发（allSettled：任一失败都不影响其它两项，互不阻塞）。
+      const [modsRes, reportRes, healthRes] = await Promise.allSettled([
+        listModules(3000),
+        getSelfCheck(3000),
+        fetchHealth(3000),
+      ])
       if (seq !== seqRef.current) return // 已被更新的请求/卸载作废
-      setModules(mods)
-      setSelfcheck(report)
+
+      // 存储是独立项：成功且有 storage ⇒ 展示；失败/缺省 ⇒ null，绝不拖累模块/自检。
+      if (healthRes.status === 'fulfilled' && healthRes.value.storage) {
+        setStorage(healthRes.value.storage)
+        setStorageCheckedAt(healthRes.value.storage.last_check || new Date().toISOString())
+      } else {
+        setStorage(null)
+        setStorageCheckedAt(undefined)
+      }
+
+      // 模块/自检仍保持原语义：任一失败即整体判为未连接（快速失败）。
+      if (modsRes.status === 'rejected') throw modsRes.reason
+      if (reportRes.status === 'rejected') throw reportRes.reason
+
+      setModules(modsRes.value)
+      setSelfcheck(reportRes.value)
       setState('online')
       setError('')
       setLastUpdated(Date.now())
@@ -86,5 +112,15 @@ export function useAppStatus(): AppStatus {
     }
   }, [refresh])
 
-  return { state, modules, selfcheck, error, lastUpdated, refreshing, refresh }
+  return {
+    state,
+    modules,
+    selfcheck,
+    storage,
+    storageCheckedAt,
+    error,
+    lastUpdated,
+    refreshing,
+    refresh,
+  }
 }

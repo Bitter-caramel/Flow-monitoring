@@ -59,7 +59,7 @@ export function ModuleGraphPanel() {
   const selected = nodes.find((n) => n.id === selectedId) ?? null
 
   return (
-    <div className="flex h-[70vh] min-h-[420px] gap-3">
+    <div className="flex h-full min-h-0 gap-3">
       <div className="min-w-0 flex-1 overflow-auto rounded-sm border border-subtle bg-app p-3">
         <DependencyGraph
           nodes={nodes}
