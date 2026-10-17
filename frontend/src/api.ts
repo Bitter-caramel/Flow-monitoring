@@ -231,6 +231,8 @@ export interface GraphNode {
   injects: string[]
   http_base?: string
   binary?: string
+  /** 插件目录里是否有可执行文件；false ⇒ 启用也起不来 */
+  has_binary: boolean
   state: string
 }
 

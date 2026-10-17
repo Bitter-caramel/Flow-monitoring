@@ -267,6 +267,10 @@ function NodeDetail({ node }: { node: GraphNode }) {
       <DetailRow label="injects" value={injects} />
       <DetailRow label="http_base" value={node.http_base || '-'} />
       <DetailRow label="binary" value={node.binary || '-'} />
+      <DetailRow label="可执行文件" value={node.has_binary ? '有' : '无'} />
+      {!node.has_binary && (
+        <div className="text-warn text-xs">启用也起不来（需先有 bin/plugins/{node.binary || '<binary>'}）</div>
+      )}
     </div>
   )
 }
