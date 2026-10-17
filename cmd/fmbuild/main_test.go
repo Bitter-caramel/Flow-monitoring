@@ -71,7 +71,7 @@ func TestRun_List_InProcessRow(t *testing.T) {
 	}
 }
 
-// 测试 10：--list 全量输出 13 个模块，importer/query 两行是 build。
+// 测试 10：--list 全量输出 13 个模块，importer/query 两行是 build，detect/rule 为 skip:inprocess。
 func TestRun_List_AllModules(t *testing.T) {
 	code, stdout, stderr := runCLI(t, "--repo=../..", "--list")
 	if code != 0 {

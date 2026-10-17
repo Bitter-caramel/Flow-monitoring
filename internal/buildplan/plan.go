@@ -86,8 +86,8 @@ type Plan struct {
 //     ★ 目的：绝不能构建一个运行期必然缺依赖起不来的模块还报成功。
 //
 // 两种模式对"缺源码"的语义**刻意不同**：ModeModules 是用户点了名要的，缺源码必须
-// 报错；ModeAll/ModeCoreOnly 是"能构建多少算多少"，缺源码只跳过（真实仓库 13 个
-// 清单里只有 importer/query 有源码，否则 --all 直接失败）。
+// 报错；ModeAll/ModeCoreOnly 是"能构建多少算多少"，缺源码只跳过（真实仓库 13 个清单里，
+// 除了 2 个内嵌模块 detect/rule，只有 importer/query 有源码，否则 --all 直接失败）。
 //
 // hasSource 为 nil 时视为"全部有源码"（不做源码裁剪）。
 func Build(reg *registry.Registry, mode Mode, ids []string, hasSource func(registry.Descriptor) bool) (*Plan, error) {

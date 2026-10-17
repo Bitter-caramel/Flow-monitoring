@@ -9,7 +9,7 @@ import (
 	"flow-monitoring/internal/kernel/registry"
 )
 
-// 测试 15：ModulePackage 按清单把 id 精确映射成包路径（13 个真实清单全覆盖）。
+// 测试 15：ModulePackage 按清单把 id 精确映射成包路径（13 个真实清单全覆盖，其中 2 个内嵌模块归 Warnings）。
 func TestModulePackage_MapsManifests(t *testing.T) {
 	reg, err := registry.Load("../../registry/backend-modules")
 	if err != nil {

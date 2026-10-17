@@ -19,7 +19,7 @@
    │   eventbus · config · logging · health · storage · datamodel
    │
    └─ 模块进程（每个模块一个独立二进制，经 go-plugin/RPC 挂载）
-       query · importer · detect · situation · disposal · alert · …
+       importer · query（真进程；其余 9 个待补，detect/rule 是内嵌库）
    └─ 网关按 http_base 前缀反代到各模块进程
 ```
 
@@ -71,7 +71,8 @@ go run ./cmd/parse-cli testdata/test.pcapng
 | 存储 | ✅ 完成（PostgreSQL + 原始包文件仓库 packetstore） |
 | 前端壳 | ✅ 完成（shell + 面板注册表 + 2 个面板） |
 | 完整插件样板 | ✅ `query`、`importer`（module.go + main.go + json 三件套） |
-| 其余 11 个模块 | ⬜ 已注册 json（`enabled: false`），业务代码待补：detect / situation / disposal / alert / attackchain / auth / capture / rule / ioc / case / export |
+| 其余 9 个模块 | ⬜ 已注册 json，业务代码待补：situation / disposal / alert / attackchain / auth / capture / ioc / case / export |
+| 内嵌库 2 个 | ✅ detect（检测引擎）、rule（规则翻译器）已实现，以库形式链接进宿主进程，无独立二进制、不可启停 |
 
 ## 五、文档
 

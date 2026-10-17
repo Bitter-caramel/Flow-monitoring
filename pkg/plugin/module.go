@@ -23,7 +23,7 @@ const rpcServiceName = "Plugin"
 //
 // 生命周期（由宿主按依赖拓扑序驱动）：
 //
-//	Start：模块读取配置快照、监听 FLOW_MODULE_HTTP_ADDR、开始干活
+//	Start：模块回连宿主、读配置快照、按 Manifest.HTTPBase 起 HTTP（127.0.0.1 随机端口）、开始干活
 //	Stop：模块优雅关闭（幂等）
 //	Health：宿主定期探活；不健康时宿主可重启该进程
 type Module interface {
