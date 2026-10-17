@@ -73,6 +73,8 @@ go run ./cmd/parse-cli testdata/test.pcapng
 | 完整插件样板 | ✅ `query`、`importer`（module.go + main.go + json 三件套） |
 | 其余 9 个模块 | ⬜ 已注册 json，业务代码待补：situation / disposal / alert / attackchain / auth / capture / ioc / case / export |
 | 内嵌库 2 个 | ✅ detect（检测引擎）、rule（规则翻译器）已实现，以库形式链接进宿主进程，无独立二进制、不可启停 |
+| **检测端到端** | ✅ **已跑通（2026-10-17）**：`rules/` 8 条规则 + `testdata/attacks/` 6 个样本，`parse-cli --rules-dir rules` 能命中并给出证据（规则/sid/缓冲/偏移/片段）；**正常流量零误报** |
+| 实时链路 | ⬜ `cmd/server` 尚未接热路径；实时采集（`capture`）未实现 |
 
 ## 五、文档
 

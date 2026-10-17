@@ -10,7 +10,7 @@
 | # | 读什么 | 它回答什么问题 |
 |---|---|---|
 | 1 | `docs/项目状态.md` | **现在到哪了**：最新提交、已完成/进行中、下一步、未决事项、在跑的后台任务、最近踩的坑 |
-| 2 | `docs/开发方向和任务清单.md` | **要往哪去**：6 个大方向、粗待办、**5 条跑偏判据**、明确不做的事 |
+| 2 | `docs/开发方向和任务清单.md` | **要往哪去**：大方向、粗待办、**跑偏判据**、明确不做的事 |
 | 3 | `D:\AAAGitProject\MemoryBank\开发\规范\多agent协作skill.md` | **怎么配合**：谁拍板、任务怎么派、提交怎么走、红线 |
 
 > ⚠️ `MemoryBank` 在**项目外**（`D:\AAAGitProject\MemoryBank`），不在仓库里。
@@ -20,12 +20,13 @@
 
 | 要找什么 | 在哪 |
 |---|---|
-| 历史大任务怎么做的（1~13） | `D:\AAAGitProject\MemoryBank\开发\任务记录\flow-monitoring\00-说明与索引.md` |
-| 踩过的坑（1~48） | `D:\AAAGitProject\MemoryBank\开发\踩坑记录\flow-monitoring.md` |
+| 历史大任务怎么做的 | `D:\AAAGitProject\MemoryBank\开发\任务记录\flow-monitoring\00-说明与索引.md` |
+| 踩过的坑（编号见文件） | `D:\AAAGitProject\MemoryBank\开发\踩坑记录\flow-monitoring.md` |
 | 遇到不熟的技术决策 | `D:\AAAGitProject\MemoryBank\开发\规范\技术决策方法.md` |
 | 怎么驱动 trae | `D:\AAAGitProject\MemoryBank\开发\规范\编码CLI操控Skill.md` |
 | 压缩/交接流程 | `D:\AAAGitProject\MemoryBank\开发\规范\上下文压缩与状态交接.md` |
 | 项目设计文档 | `docs/`（架构、插件与模块、检测引擎、规则翻译器、TCP重组、告警与收集…） |
+| **写测试 / 查测试坑** | `docs/测试规范与指南.md`（测试形状、断言强度与变异、黑盒/白盒手法、坑专章、agent 测试规范） |
 
 ## 三、三条铁律
 
