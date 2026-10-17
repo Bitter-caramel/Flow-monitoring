@@ -14,6 +14,7 @@ export function ModuleGraphPanel() {
   const [error, setError] = useState('')
   const [selectedId, setSelectedId] = useState('')
   const [reloadKey, setReloadKey] = useState(0)
+  const [resetSignal, setResetSignal] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -60,13 +61,25 @@ export function ModuleGraphPanel() {
 
   return (
     <div className="flex h-full min-h-0 gap-3">
-      <div className="min-w-0 flex-1 overflow-auto rounded-sm border border-subtle bg-app p-3">
-        <DependencyGraph
-          nodes={nodes}
-          edges={edges}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-        />
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
+        <div className="flex items-center justify-end">
+          <button
+            type="button"
+            className="rounded-sm border border-subtle bg-elevated px-2 py-1 text-sm text-fg hover:border-strong hover:text-accent"
+            onClick={() => setResetSignal((n) => n + 1)}
+          >
+            重置布局
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-hidden rounded-sm border border-subtle bg-app p-3">
+          <DependencyGraph
+            nodes={nodes}
+            edges={edges}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            resetSignal={resetSignal}
+          />
+        </div>
       </div>
 
       <aside className="w-[320px] min-w-[320px] overflow-auto border-l border-subtle bg-panel p-3">
