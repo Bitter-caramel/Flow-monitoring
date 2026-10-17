@@ -1,0 +1,1 @@
+alert tcp any any -> any any (msg:"ET SIMULATED: path traversal probe"; payload; content:"../"; classtype:attempted-recon; sid:2000001;)

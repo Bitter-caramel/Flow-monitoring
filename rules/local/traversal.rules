@@ -1,0 +1,1 @@
+alert tcp any any -> any any (msg:"目录遍历 etc/passwd"; payload; content:"/../../etc/passwd"; classtype:attempted-recon; sid:1000003;)

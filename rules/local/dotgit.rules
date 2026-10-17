@@ -1,0 +1,1 @@
+alert tcp any any -> any any (msg:"敏感文件 .git/config"; payload; content:"/.git/config"; classtype:attempted-recon; sid:1000004;)

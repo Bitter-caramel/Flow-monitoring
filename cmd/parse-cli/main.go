@@ -5,17 +5,20 @@
 //
 // 用法：
 //
-//	parse-cli <file.pcapng> [--limit N] [--analyze] [--top N] [--detect <规则文件>] [--alerts <文件>]
+//	parse-cli <file.pcapng> [--limit N] [--analyze] [--top N] [--detect <规则文件>|--rules-dir <目录>] [--alerts <文件>]
 //
 // 输出列：No / 时间 / 源 → 目的 / 协议 / 长度 / INFO
 // 开启 --analyze 后不再逐包打印，改为输出流聚合/协议/端点/端口四段统计。
 // 开启 --detect 后加载规则文件做检测，不逐包打印，仅打印命中行与告警汇总。
+// 开启 --rules-dir 后按来源目录（builtin/local/et/public）加载规则，先打印
+// 规则集导入报告，再做检测。
 // 配合 --alerts 时把告警写成 JSON Lines 文件。
 package main
 
 import (
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -32,43 +35,83 @@ import (
 )
 
 func main() {
-	limit := flag.Int("limit", 0, "最大解析包数（0=不限制）")
-	analyze := flag.Bool("analyze", false, "启用流聚合分析（不逐包打印）")
-	top := flag.Int("top", 10, "排行榜显示条数")
-	detectPath := flag.String("detect", "", "载入规则文件并做检测（如 --detect rules.rules）")
-	alertsPath := flag.String("alerts", "", "把告警写成 JSON Lines 到该文件（配合 --detect）")
-	flag.Parse()
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// run 是 CLI 的可测试入口：解析参数、执行解析/检测并返回进程退出码。
+func run(argv []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("parse-cli", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "用法: parse-cli <file.pcapng> [--limit N] [--analyze] [--top N] [--detect <规则文件>|--rules-dir <目录>] [--alerts <文件>]")
+		fs.PrintDefaults()
+	}
+
+	limit := fs.Int("limit", 0, "最大解析包数（0=不限制）")
+	analyze := fs.Bool("analyze", false, "启用流聚合分析（不逐包打印）")
+	top := fs.Int("top", 10, "排行榜显示条数")
+	detectPath := fs.String("detect", "", "载入规则文件并做检测（如 --detect rules.rules）")
+	rulesDir := fs.String("rules-dir", "", "按来源目录载入规则并做检测（如 --rules-dir rules），与 --detect 互斥")
+	alertsPath := fs.String("alerts", "", "把告警写成 JSON Lines 到该文件（配合 --detect/--rules-dir）")
 
 	// Go 的 flag 包默认在首个位置参数（文件名）处停止解析，
 	// 因此把文件名之后的剩余参数再解析一次，
 	// 以兼容 `parse-cli <file> --analyze` 这种"文件在前"的用法。
-	args := flag.Args()
+	if err := fs.Parse(argv); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 2
+	}
+	args := fs.Args()
 	if len(args) > 1 {
-		_ = flag.CommandLine.Parse(args[1:])
+		if err := fs.Parse(args[1:]); err != nil {
+			if err == flag.ErrHelp {
+				return 0
+			}
+			return 2
+		}
 		args = args[:1]
 	}
 
+	// --detect 与 --rules-dir 互斥：同时给出属于用法错误，退出码 2。
+	// ★ 必须放在「缺文件名」检查之前：只要两个参数同时出现就应当报用法错误，
+	// 不能被"先把文件补上"这种无关问题掩盖掉。
+	if *detectPath != "" && *rulesDir != "" {
+		fmt.Fprintln(stderr, "错误: --detect 与 --rules-dir 不能同时使用（二选一）")
+		return 2
+	}
+
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "用法: parse-cli <file.pcapng> [--limit N] [--analyze] [--top N] [--detect <规则文件>] [--alerts <文件>]")
-		os.Exit(1)
+		fmt.Fprintln(stderr, "用法: parse-cli <file.pcapng> [--limit N] [--analyze] [--top N] [--detect <规则文件>|--rules-dir <目录>] [--alerts <文件>]")
+		return 1
 	}
 	path := args[0]
 
-	// --detect：载入规则文件并构建检测引擎（检测也依赖流归属）；
+	// 检测模式：载入规则并构建检测引擎（检测也依赖流归属）；
 	// 同时接线告警链路：事件总线 -> 消费者 -> JSONL 落盘。
 	var hp *hotpath.Hotpath
 	var bus *eventbus.Bus
 	var cons *alert.Consumer
 	captureID := ""
+	var rs *detect.RuleSet
 	if *detectPath != "" {
-		rs, err := detect.LoadFile(*detectPath)
+		loaded, err := detect.LoadFile(*detectPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "载入规则文件失败: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(stderr, "载入规则文件失败: %v\n", err)
+			return 1
 		}
-		fmt.Print(rs.Report.String())
-		fmt.Println()
+		rs = loaded
+		fmt.Fprint(stdout, rs.Report.String())
+		fmt.Fprintln(stdout)
+	} else if *rulesDir != "" {
+		loaded, report := detect.LoadDir(*rulesDir)
+		rs = loaded
+		fmt.Fprint(stdout, report.String())
+		fmt.Fprintln(stdout)
+	}
 
+	if rs != nil {
 		// ★ 热路径编排收敛到 internal/hotpath：分析器/引擎/重组器由 hp 统一持有，
 		// 其中重组器遵循 11-4 的"跳过优化"（未引用 stream 则不建）。
 		hp = hotpath.New(rs)
@@ -81,12 +124,12 @@ func main() {
 		// --alerts 非空才落盘；否则 sink 传 nil（Consumer 支持 nil sink）。
 		var sink alert.Sink
 		if *alertsPath != "" {
-			fs, err := alert.NewFileSink(*alertsPath)
+			f, err := alert.NewFileSink(*alertsPath)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "打开告警文件失败: %v\n", err)
-				os.Exit(1)
+				fmt.Fprintf(stderr, "打开告警文件失败: %v\n", err)
+				return 1
 			}
-			sink = fs
+			sink = f
 		}
 		cons = alert.NewConsumerFromBus(bus, alert.TopicAlertLifecycle, 4096, sink, alert.ConsumerOptions{})
 		defer cons.Close()
@@ -94,40 +137,40 @@ func main() {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "读取文件失败: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "读取文件失败: %v\n", err)
+		return 1
 	}
 
-	cap, err := pcapng.Parse(data, *limit)
+	capture, err := pcapng.Parse(data, *limit)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "解析失败: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "解析失败: %v\n", err)
+		return 1
 	}
 
-	fmt.Printf("格式: %s  字节序: %s  版本: %s\n", cap.Format, cap.Endian, cap.Version)
-	fmt.Printf("链路类型: %d  接口数: %d  包数: %d\n", cap.LinkType, len(cap.Ifaces), len(cap.Packets))
-	for i, ifc := range cap.Ifaces {
-		fmt.Printf("  接口[%d]: linktype=%d snaplen=%d name=%q\n", i, ifc.LinkType, ifc.SnapLen, ifc.Name)
+	fmt.Fprintf(stdout, "格式: %s  字节序: %s  版本: %s\n", capture.Format, capture.Endian, capture.Version)
+	fmt.Fprintf(stdout, "链路类型: %d  接口数: %d  包数: %d\n", capture.LinkType, len(capture.Ifaces), len(capture.Packets))
+	for i, ifc := range capture.Ifaces {
+		fmt.Fprintf(stdout, "  接口[%d]: linktype=%d snaplen=%d name=%q\n", i, ifc.LinkType, ifc.SnapLen, ifc.Name)
 	}
-	if len(cap.Warns) > 0 {
-		fmt.Printf("警告 %d 条:\n", len(cap.Warns))
-		for _, w := range cap.Warns {
-			fmt.Printf("  - %s\n", w)
+	if len(capture.Warns) > 0 {
+		fmt.Fprintf(stdout, "警告 %d 条:\n", len(capture.Warns))
+		for _, w := range capture.Warns {
+			fmt.Fprintf(stdout, "  - %s\n", w)
 		}
 	}
-	fmt.Println()
+	fmt.Fprintln(stdout)
 
 	// 表头（仅在逐包模式下打印）。
 	if !*analyze && hp == nil {
-		fmt.Printf("%-6s %-18s %-21s %-21s %-9s %-6s %s\n",
+		fmt.Fprintf(stdout, "%-6s %-18s %-21s %-21s %-9s %-6s %s\n",
 			"No.", "Time", "Source", "Destination", "Protocol", "Length", "Info")
-		fmt.Println("----------------------------------------------------------------------------------------------")
+		fmt.Fprintln(stdout, "----------------------------------------------------------------------------------------------")
 	}
 
 	// 检测/分析模式都需要流归属。
 	// ★ 检测模式复用 hotpath 内部的分析器（--analyze --detect 同时用时只有这一个实例）。
 	var a *analyzer.Analyzer
-	if *detectPath != "" {
+	if hp != nil {
 		a = hp.Analyzer()
 	} else if *analyze {
 		a = analyzer.New()
@@ -138,10 +181,10 @@ func main() {
 	hitsByRule := make(map[string]int)
 	nameByRule := make(map[string]string)
 
-	for _, p := range cap.Packets {
-		linkType := cap.LinkType
-		if p.Iface >= 0 && p.Iface < len(cap.Ifaces) {
-			linkType = cap.Ifaces[p.Iface].LinkType
+	for _, p := range capture.Packets {
+		linkType := capture.LinkType
+		if p.Iface >= 0 && p.Iface < len(capture.Ifaces) {
+			linkType = capture.Ifaces[p.Iface].LinkType
 		}
 		decoder.Decode(p, linkType)
 
@@ -154,13 +197,13 @@ func main() {
 				if _, ok := nameByRule[h.RuleID]; !ok {
 					nameByRule[h.RuleID] = h.Name
 				}
-				fmt.Printf("[命中] No=%d 时间=%s %s:%d → %s:%d 规则=%s(%s) 缓冲=%s 偏移=%d 片段=%q\n",
+				fmt.Fprintf(stdout, "[命中] No=%d 时间=%s %s:%d → %s:%d 规则=%s(%s) 缓冲=%s 偏移=%d 片段=%q\n",
 					p.No, formatTime(p), p.Src, p.SrcPort, p.Dst, p.DstPort,
 					h.RuleID, h.Name, h.Buffer, h.Offset, h.Snippet)
 
 				// 发布告警到总线（消费者异步去重后落盘）；发布失败只告警，不中断扫描。
 				if err := bus.Publish(alert.TopicAlertLifecycle, alert.Event{CaptureID: captureID, Alert: h}); err != nil {
-					fmt.Fprintf(os.Stderr, "发布告警失败: %v\n", err)
+					fmt.Fprintf(stderr, "发布告警失败: %v\n", err)
 				}
 			}
 			continue
@@ -180,7 +223,7 @@ func main() {
 		}
 		length := p.CapLen
 
-		fmt.Printf("%-6d %-18s %-21s %-21s %-9s %-6d %s\n",
+		fmt.Fprintf(stdout, "%-6d %-18s %-21s %-21s %-9s %-6d %s\n",
 			p.No, formatTime(p), src, dst, proto, length, p.Info)
 	}
 
@@ -201,16 +244,16 @@ func main() {
 			}
 			return groups[i].ID < groups[j].ID
 		})
-		fmt.Printf("=== 检测结果：命中 %d 次，涉及 %d 条规则 ===\n", alertTotal, len(groups))
+		fmt.Fprintf(stdout, "=== 检测结果：命中 %d 次，涉及 %d 条规则 ===\n", alertTotal, len(groups))
 		for _, g := range groups {
-			fmt.Printf("规则 %s (%s) 命中 %d 次\n", g.ID, g.Name, g.Count)
+			fmt.Fprintf(stdout, "规则 %s (%s) 命中 %d 次\n", g.ID, g.Name, g.Count)
 		}
 
 		// 显式关闭消费者以冲刷落盘（Close 由 sync.Once 保护，defer 再调安全）。
 		if cons != nil {
 			_ = cons.Close()
 			if *alertsPath != "" {
-				fmt.Printf("告警已写入 %s（写入 %d 条，去重压制 %d 条）\n",
+				fmt.Fprintf(stdout, "告警已写入 %s（写入 %d 条，去重压制 %d 条）\n",
 					*alertsPath, cons.Written(), cons.Suppressed())
 			}
 		}
@@ -218,12 +261,14 @@ func main() {
 
 	// 收尾 2：纯分析统计（保持原有顺序/格式）。
 	if *analyze {
-		printAnalysis(a, *top)
+		printAnalysis(stdout, a, *top)
 	}
+
+	return 0
 }
 
 // printAnalysis 打印聚合分析结果：流聚合/协议/端点/端口四段。
-func printAnalysis(a *analyzer.Analyzer, top int) {
+func printAnalysis(stdout io.Writer, a *analyzer.Analyzer, top int) {
 	if top < 0 {
 		top = 0
 	}
@@ -240,15 +285,15 @@ func printAnalysis(a *analyzer.Analyzer, top int) {
 	if flowShow > top {
 		flowShow = top
 	}
-	fmt.Printf("=== 流聚合（共 %d 条，显示前 %d 条）：===\n", len(flows), flowShow)
+	fmt.Fprintf(stdout, "=== 流聚合（共 %d 条，显示前 %d 条）：===\n", len(flows), flowShow)
 	for i := 0; i < flowShow; i++ {
 		f := flows[i]
-		fmt.Printf("%d) %s:%d 到 %s:%d  Kind=%s  PacketCnt=%d  ByteCnt=%d  State=%s  Dirs[0](A→B) 包数=%d 字节数=%d  Dirs[1](B→A) 包数=%d 字节数=%d\n",
+		fmt.Fprintf(stdout, "%d) %s:%d 到 %s:%d  Kind=%s  PacketCnt=%d  ByteCnt=%d  State=%s  Dirs[0](A→B) 包数=%d 字节数=%d  Dirs[1](B→A) 包数=%d 字节数=%d\n",
 			i+1, ip4String(f.A), f.APort, ip4String(f.B), f.BPort,
 			f.Kind, f.PacketCnt, f.ByteCnt, flowStateName(f.State),
 			f.Dirs[0].Packets, f.Dirs[0].Bytes, f.Dirs[1].Packets, f.Dirs[1].Bytes)
 	}
-	fmt.Println()
+	fmt.Fprintln(stdout)
 
 	// b) 协议统计：按包数降序（全部）。
 	stats := a.Stats()
@@ -264,16 +309,16 @@ func printAnalysis(a *analyzer.Analyzer, top int) {
 		}
 		return protoNames[i] < protoNames[j]
 	})
-	fmt.Printf("=== 协议统计（共 %d 种，按包数降序）：===\n", len(protoNames))
+	fmt.Fprintf(stdout, "=== 协议统计（共 %d 种，按包数降序）：===\n", len(protoNames))
 	for _, name := range protoNames {
 		st := stats.Protocols[name]
 		label := name
 		if label == "" {
 			label = "?"
 		}
-		fmt.Printf("%s  包数=%d  字节数=%d\n", label, st.Packets, st.Bytes)
+		fmt.Fprintf(stdout, "%s  包数=%d  字节数=%d\n", label, st.Packets, st.Bytes)
 	}
-	fmt.Println()
+	fmt.Fprintln(stdout)
 
 	// c) 端点 TOP N（按字节数）。
 	endpoints := make([]analyzer.EndpointStat, 0, len(stats.Endpoints))
@@ -293,13 +338,13 @@ func printAnalysis(a *analyzer.Analyzer, top int) {
 	if endpointShow > top {
 		endpointShow = top
 	}
-	fmt.Printf("=== 端点 TOP %d（按字节数，共 %d 对）：===\n", endpointShow, len(endpoints))
+	fmt.Fprintf(stdout, "=== 端点 TOP %d（按字节数，共 %d 对）：===\n", endpointShow, len(endpoints))
 	for i := 0; i < endpointShow; i++ {
 		e := endpoints[i]
-		fmt.Printf("%d) %s 到 %s  字节数=%d  包数=%d\n",
+		fmt.Fprintf(stdout, "%d) %s 到 %s  字节数=%d  包数=%d\n",
 			i+1, ip4String(e.A), ip4String(e.B), e.Bytes, e.Packets)
 	}
-	fmt.Println()
+	fmt.Fprintln(stdout)
 
 	// d) 端口 TOP N（按包数）。
 	type portEntry struct {
@@ -320,11 +365,11 @@ func printAnalysis(a *analyzer.Analyzer, top int) {
 	if portShow > top {
 		portShow = top
 	}
-	fmt.Printf("=== 端口 TOP %d（按包数，共 %d 个）：===\n", portShow, len(ports))
+	fmt.Fprintf(stdout, "=== 端口 TOP %d（按包数，共 %d 个）：===\n", portShow, len(ports))
 	for i := 0; i < portShow; i++ {
-		fmt.Printf("%d) 端口 %d  包数=%d\n", i+1, ports[i].Port, ports[i].Packets)
+		fmt.Fprintf(stdout, "%d) 端口 %d  包数=%d\n", i+1, ports[i].Port, ports[i].Packets)
 	}
-	fmt.Println("=== 分析结束 ===")
+	fmt.Fprintln(stdout, "=== 分析结束 ===")
 }
 
 // ip4String 把 IPv4 的 uint32 整数转换为点分十进制字符串。

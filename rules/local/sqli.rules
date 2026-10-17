@@ -1,0 +1,1 @@
+alert tcp any any -> any any (msg:"SQLi: UNION SELECT"; payload; content:"UNION"; nocase; content:"SELECT"; nocase; classtype:web-application-attack; sid:1000001;)

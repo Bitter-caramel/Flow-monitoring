@@ -1,0 +1,1 @@
+alert tcp any any -> any any (msg:"可疑 UA: MSIE 6.0"; http_header; content:"MSIE 6.0"; nocase; classtype:trojan-activity; sid:1000005;)

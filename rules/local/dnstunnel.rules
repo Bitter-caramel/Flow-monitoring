@@ -1,0 +1,1 @@
+alert udp any any -> any any (msg:"疑似 DNS 隧道: 超长标签"; dns_query; pcre:"/^[a-z0-9]{40,}\./i"; classtype:misc-activity; sid:1000006;)
