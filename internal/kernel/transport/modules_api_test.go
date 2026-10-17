@@ -54,9 +54,14 @@ func newAPIServer(t *testing.T, ds []registry.Descriptor, rt modulecontrol.Runti
 }
 
 // do 走完整中间件链（s.Handler）发一个请求，返回状态码与响应体；不起真实监听。
+//
+// 非 GET/HEAD 自动带 CSRF 头（控制面防护三件套要求），不放宽任何断言。
 func do(t *testing.T, s *Server, method, target string) (int, []byte) {
 	t.Helper()
 	req := httptest.NewRequest(method, target, nil)
+	if method != http.MethodGet && method != http.MethodHead {
+		req.Header.Set("X-Flow-Request", "1")
+	}
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 	resp := rec.Result()

@@ -84,7 +84,11 @@ func stateOf(states map[string]string, id string) string {
 //
 // 关闭时用 Impact(id).Dependents（已是"先关最末端消费者"的反向拓扑序）逐个 StopOne，
 // 最后才停目标本身；启用时只启它自己，不级联启动依赖者。
-func (s *Service) SetEnabledCascade(ctx context.Context, id string, enabled bool) (CascadeResult, error) {
+//
+// ★ 无论成功/失败都会写一条审计（dry_run=false）；审计失败只记 Warn。
+func (s *Service) SetEnabledCascade(ctx context.Context, id string, enabled bool) (res CascadeResult, err error) {
+	defer func() { s.auditChange(ctx, id, enabled, false, err) }()
+
 	// 先按磁盘最新状态校验（存在性 + core 保护），失败时绝不动清单/后端。
 	reg, err := registry.Load(s.dir)
 	if err != nil {

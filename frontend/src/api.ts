@@ -39,13 +39,53 @@ export interface PageResult<T> {
   limit: number
 }
 
+/** localStorage 里的控制面 Token 键（不做登录页，只读这里）。 */
+const TOKEN_STORAGE_KEY = 'fm.token'
+
+/** 401 时的统一文案。 */
+const TOKEN_REQUIRED_MESSAGE = '需要 Token：请在浏览器 localStorage 设置 fm.token'
+
+/**
+ * 统一请求头：所有非 GET/HEAD 请求带 CSRF 头；localStorage 有 fm.token 时带 Bearer。
+ *
+ * ★ 只在请求封装里加，不散落到各面板。
+ */
+function requestHeaders(method: string): Record<string, string> {
+  const headers: Record<string, string> = {}
+  if (method !== 'GET' && method !== 'HEAD') {
+    headers['X-Flow-Request'] = '1'
+  }
+  try {
+    const token =
+      typeof window !== 'undefined' ? window.localStorage.getItem(TOKEN_STORAGE_KEY) : null
+    if (token) headers['Authorization'] = `Bearer ${token}`
+  } catch {
+    // localStorage 不可用（隐私模式等）：忽略，不影响请求。
+  }
+  return headers
+}
+
+/** 非 2xx 统一抛错；401 给出可操作的 Token 提示，其余优先用后端 error 文案。 */
+async function throwIfNotOK(resp: Response): Promise<void> {
+  if (resp.ok) return
+  if (resp.status === 401) {
+    throw new Error(TOKEN_REQUIRED_MESSAGE)
+  }
+  const detail = await readErrorDetail(resp)
+  throw new Error(detail || `HTTP ${resp.status} ${resp.statusText}`)
+}
+
 /** 上传 pcap 文件（multipart）。 */
 export async function importCapture(file: File, name?: string): Promise<CaptureRecord> {
   const form = new FormData()
   form.append('file', file)
   if (name) form.append('name', name)
-  const resp = await fetch('/api/v1/captures/import', { method: 'POST', body: form })
-  if (!resp.ok) throw new Error(await resp.text())
+  const resp = await fetch('/api/v1/captures/import', {
+    method: 'POST',
+    body: form,
+    headers: requestHeaders('POST'),
+  })
+  await throwIfNotOK(resp)
   return resp.json()
 }
 
@@ -64,8 +104,10 @@ function normalizePage<T>(raw: PageResult<T>): PageResult<T> {
 
 /** 列出 captures。 */
 export async function listCaptures(offset = 0, limit = 50): Promise<PageResult<CaptureRecord>> {
-  const resp = await fetch(`/api/v1/captures?offset=${offset}&limit=${limit}`)
-  if (!resp.ok) throw new Error(await resp.text())
+  const resp = await fetch(`/api/v1/captures?offset=${offset}&limit=${limit}`, {
+    headers: requestHeaders('GET'),
+  })
+  await throwIfNotOK(resp)
   return normalizePage<CaptureRecord>(await resp.json())
 }
 
@@ -77,8 +119,9 @@ export async function listPackets(
 ): Promise<PageResult<PacketRecord>> {
   const resp = await fetch(
     `/api/v1/captures/${captureId}/packets?offset=${offset}&limit=${limit}`,
+    { headers: requestHeaders('GET') },
   )
-  if (!resp.ok) throw new Error(await resp.text())
+  await throwIfNotOK(resp)
   return normalizePage<PacketRecord>(await resp.json())
 }
 
@@ -130,11 +173,9 @@ async function getJSON<T>(path: string, timeoutMs = 3000): Promise<T> {
   try {
     const resp = await fetch(path, {
       signal: ctrl.signal,
-      headers: { Accept: 'application/json' },
+      headers: { Accept: 'application/json', ...requestHeaders('GET') },
     })
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status} ${resp.statusText}`)
-    }
+    await throwIfNotOK(resp)
     return (await resp.json()) as T
   } finally {
     window.clearTimeout(timer)
@@ -302,12 +343,9 @@ async function readErrorDetail(resp: Response): Promise<string> {
 async function postJSON<T>(path: string): Promise<T> {
   const resp = await fetch(path, {
     method: 'POST',
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', ...requestHeaders('POST') },
   })
-  if (!resp.ok) {
-    const detail = await readErrorDetail(resp)
-    throw new Error(detail || `HTTP ${resp.status} ${resp.statusText}`)
-  }
+  await throwIfNotOK(resp)
   return (await resp.json()) as T
 }
 

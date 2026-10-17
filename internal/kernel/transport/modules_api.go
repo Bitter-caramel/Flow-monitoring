@@ -121,6 +121,8 @@ func (a *modulesAPI) disable(w http.ResponseWriter, r *http.Request) {
 	}
 	if dry {
 		imp, err := a.svc.Impact(id)
+		// ★ dry_run 也记审计（标 dry_run:true）；审计不影响主流程。
+		a.svc.AuditDryRun(r.Context(), id, false, err)
 		if err != nil {
 			writeErr(w, err)
 			return

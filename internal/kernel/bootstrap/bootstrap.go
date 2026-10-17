@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -56,6 +57,11 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 	}
 	if logger == nil {
 		logger = logging.New(logging.LevelInfo, "json", os.Stdout)
+	}
+
+	// ★ 控制面红线（设计文档 §6.3）：非回环监听必须配置 Token，否则拒绝启动。
+	if err := config.ValidateListenAuth(cfg.Server.HTTPAddr, cfg.Auth.Token); err != nil {
+		return nil, fmt.Errorf("bootstrap: %w", err)
 	}
 
 	bus := eventbus.New()
@@ -125,6 +131,7 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 	h := health.New(mgr)
 
 	ts := transport.New(cfg.Server.HTTPAddr, logger)
+	ts.SetAPIToken(cfg.Auth.Token)
 	ts.SetGatewayResolver(bridge.Resolve)
 	ts.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		// 在既有健康报告后追加 storage 字段，让"存储降级被看见"。
@@ -153,6 +160,20 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 		return nil, fmt.Errorf("bootstrap: module control: %w", err)
 	}
 	mctl = mctl.WithRuntime(pluginhost.NewRuntimeBackend(mgr, reg, 0))
+
+	// 控制面审计：写 logs/audit.jsonl（一行一条 JSON）。
+	// 构造失败只告警并关闭审计，不影响启动与主流程。
+	auditDir := cfg.Logging.Dir
+	if auditDir == "" {
+		auditDir = "logs"
+	}
+	auditSink, err := modulecontrol.NewFileAuditSink(filepath.Join(auditDir, "audit.jsonl"))
+	if err != nil {
+		logger.Warn("audit sink disabled", "err", err)
+	} else {
+		mctl = mctl.WithAuditSink(auditSink)
+	}
+
 	transport.RegisterModulesAPI(ts, mctl)
 
 	return &App{

@@ -49,6 +49,7 @@ type Options struct {
 	Logger      *logging.Logger // 可空
 	Runtime     RuntimeBackend  // ★ 可选：nil = 只改清单（12-2 行为）
 	StopTimeout time.Duration   // ★ 可选：单模块停止超时（默认 DefaultStopTimeout=10s）
+	AuditSink   AuditSink       // ★ 可选：nil = 不写审计
 }
 
 // ModuleView 给入口展示的模块视图。
@@ -105,6 +106,7 @@ type Service struct {
 	reg         *registry.Registry
 	runtime     RuntimeBackend // ★ 可选：nil = 只改清单（12-2 行为）
 	stopTimeout time.Duration  // ★ 单模块停止超时；New 时兜底为 DefaultStopTimeout
+	audit       AuditSink      // ★ 可选：nil = 不写审计
 }
 
 // New 构造服务：校验并加载清单目录。
@@ -131,7 +133,7 @@ func New(opts Options) (*Service, error) {
 	if timeout <= 0 {
 		timeout = DefaultStopTimeout
 	}
-	return &Service{dir: dir, logger: opts.Logger, reg: reg, runtime: opts.Runtime, stopTimeout: timeout}, nil
+	return &Service{dir: dir, logger: opts.Logger, reg: reg, runtime: opts.Runtime, stopTimeout: timeout, audit: opts.AuditSink}, nil
 }
 
 // List 列出全部模块视图（按 ID 升序）。

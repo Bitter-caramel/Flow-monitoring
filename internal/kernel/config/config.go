@@ -22,6 +22,7 @@ import (
 // Config 平台主配置。
 type Config struct {
 	Server      ServerConfig   `json:"server"`
+	Auth        AuthConfig     `json:"auth"`
 	Database    DBConfig       `json:"database"`
 	Logging     LogConfig      `json:"logging"`
 	DataDir     string         `json:"data_dir"`        // 原始抓包文件目录
@@ -29,6 +30,15 @@ type Config struct {
 	ManifestDir string         `json:"manifest_dir"`    // 用户扩展模块清单目录（L3）
 	StaticDir   string         `json:"static_dir"`      // 前端构建产物目录（空=不托管）
 	Extra       map[string]any `json:"extra,omitempty"` // 模块自定义配置
+}
+
+// AuthConfig 控制面鉴权配置。
+//
+// Token 为空 = 不启用 Token 鉴权；非空时所有 /api/*（含 GET）都要求
+// Authorization: Bearer <token>。监听非回环地址时 Token 不可为空
+// （启动期由 ValidateListenAuth 硬校验）。
+type AuthConfig struct {
+	Token string `json:"token"`
 }
 
 // ServerConfig HTTP/WebSocket 服务监听配置。
@@ -129,6 +139,7 @@ func Load(path string) (*Config, error) {
 //   - FLOW_LOG_LEVEL: 日志级别
 //   - FLOW_DEBUG: "1"/"true" 开启 Debug
 //   - FLOW_STATIC_DIR: 前端构建产物目录（★ 显式设为空串 = 不托管静态资源）
+//   - FLOW_API_TOKEN: 控制面 Token（覆盖 auth.token；显式空串 = 不启用）
 func applyEnv(c *Config) *Config {
 	if v := os.Getenv("FLOW_DB_DSN"); v != "" {
 		c.Database.DSN = v
@@ -142,6 +153,10 @@ func applyEnv(c *Config) *Config {
 	// 用 LookupEnv：允许"显式设为空"来表达"不要托管前端"
 	if v, ok := os.LookupEnv("FLOW_STATIC_DIR"); ok {
 		c.StaticDir = v
+	}
+	// 用 LookupEnv：允许"显式设为空"来表达"不启用 Token 鉴权"。
+	if v, ok := os.LookupEnv("FLOW_API_TOKEN"); ok {
+		c.Auth.Token = v
 	}
 	switch os.Getenv("FLOW_DEBUG") {
 	case "1", "true", "TRUE", "True":

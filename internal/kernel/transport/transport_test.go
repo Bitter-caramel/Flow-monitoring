@@ -65,7 +65,13 @@ func TestHTTPRoute_MethodMismatch(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/api/only-get", "application/json", nil)
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/only-get", nil)
+	if err != nil {
+		t.Fatalf("构造 POST: %v", err)
+	}
+	// 控制面 CSRF：非 GET/HEAD 必须带自定义头，否则会被 403 挡在路由之外。
+	req.Header.Set("X-Flow-Request", "1")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}

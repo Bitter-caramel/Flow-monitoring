@@ -27,6 +27,9 @@ type Server struct {
 	// gateway API 网关（反代模块进程），由 bootstrap 注入路由解析器。
 	gateway *gateway
 
+	// apiToken 控制面 Token（空 = 不启用）；装配期由 SetAPIToken 注入。
+	apiToken string
+
 	mu       sync.Mutex
 	started  bool
 	wsRoutes []wsRoute // 已注册的 WS 路由（优雅关闭时跟踪连接）
@@ -55,7 +58,8 @@ func New(addr string, logger *logging.Logger) *Server {
 	}
 	// 中间件链：requestID → accessLog → recover → gateway → mux
 	s.gateway = newGateway(mux)
-	s.handler = s.recoverMiddleware(s.accessLogMiddleware(s.requestIDMiddleware(s.gateway)))
+	// handler 链：请求进入 → recover → accessLog → requestID → guard（Token/CSRF）→ gateway → mux
+	s.handler = s.recoverMiddleware(s.accessLogMiddleware(s.requestIDMiddleware(s.guardMiddleware(s.gateway))))
 	s.server = &http.Server{
 		Addr:    addr,
 		Handler: s.handler,
