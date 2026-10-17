@@ -79,8 +79,25 @@ func (p *Postgres) Packets() storage.PacketStore { return &packetStore{p} }
 // Close 关闭连接池。
 func (p *Postgres) Close() error { p.pool.Close(); return nil }
 
+// Ping 探测数据库连接是否仍可用（storage.Pinger 可选扩展）。
+//
+// bootstrap 的存储巡检每 10s 调用一次：可用 ⇒ Ping，失败 ⇒ 标记不可用并
+// 关闭连接池，之后由巡检重新 Open + Migrate 实现自动恢复。
+func (p *Postgres) Ping(ctx context.Context) error {
+	if err := p.pool.Ping(ctx); err != nil {
+		return fmt.Errorf("store: ping: %w", err)
+	}
+	return nil
+}
+
 // captureStore CaptureStore 的 PostgreSQL 实现。
 type captureStore struct{ p *Postgres }
+
+// 编译期断言：PG 实现提供可选计数能力与周期巡检需要的 Ping。
+var (
+	_ storage.CaptureCounter = (*captureStore)(nil)
+	_ storage.Pinger         = (*Postgres)(nil)
+)
 
 func (s *captureStore) Create(ctx context.Context, rec *storage.CaptureRecord) error {
 	_, err := s.p.pool.Exec(ctx, `
@@ -126,6 +143,13 @@ func (s *captureStore) Get(ctx context.Context, id string) (*storage.CaptureReco
 }
 
 func (s *captureStore) List(ctx context.Context, page storage.Page) (*storage.PageResult[storage.CaptureRecord], error) {
+	// ★ 先统计真实总条数：此前固定返回 Total:-1，导致 DB 明明有数据时前端
+	// 仍显示 total=-1（2026-10-17 现场实测）。这里不再使用 -1 哨兵。
+	var total int
+	if err := s.p.pool.QueryRow(ctx, `SELECT count(*) FROM captures`).Scan(&total); err != nil {
+		return nil, fmt.Errorf("store: count captures: %w", err)
+	}
+
 	rows, err := s.p.pool.Query(ctx, `
                 SELECT id, name, format, link_type, packet_count, byte_size, file_path, sha256, first_seen, last_seen, imported_at
                 FROM captures ORDER BY imported_at DESC LIMIT $1 OFFSET $2`,
@@ -154,7 +178,19 @@ func (s *captureStore) List(ctx context.Context, page storage.Page) (*storage.Pa
 		}
 		items = append(items, rec)
 	}
-	return &storage.PageResult[storage.CaptureRecord]{Items: items, Total: -1}, rows.Err()
+	return &storage.PageResult[storage.CaptureRecord]{Items: items, Total: total}, rows.Err()
+}
+
+// Count 返回 capture 真实总条数（storage.CaptureCounter 可选扩展）。
+//
+// List 本身已经带真实 Total；本方法用于调用方只关心条数、或分页实现
+// 仍返回未统计哨兵时的兜底。
+func (s *captureStore) Count(ctx context.Context) (int, error) {
+	var n int
+	if err := s.p.pool.QueryRow(ctx, `SELECT count(*) FROM captures`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count captures: %w", err)
+	}
+	return n, nil
 }
 
 func (s *captureStore) Delete(ctx context.Context, id string) error {

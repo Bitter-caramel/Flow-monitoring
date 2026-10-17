@@ -16,7 +16,28 @@ type (
 // PageResult 分页结果（进程内泛型；跨进程用 pkg/plugin.CapturePage/PacketPage）。
 type PageResult[T any] struct {
 	Items []T
-	Total int // 总条数（用于分页导航；-1 表示未统计）
+	Total int // 总条数（用于分页导航；实现应返回真实条数）
+}
+
+// CaptureCounter 是 CaptureStore 的**可选扩展**：返回 capture 真实总条数。
+//
+// ★ 为什么不把 Count 直接并进 CaptureStore：接口一加方法，所有实现者
+// （PG、hoststore、若干测试替身）都得同步修改，还会牵动跨进程 RPC 契约。
+// 调用方按「能力探测」使用：
+//
+//	if c, ok := st.Captures().(storage.CaptureCounter); ok {
+//	    n, err := c.Count(ctx)
+//	}
+type CaptureCounter interface {
+	Count(ctx context.Context) (int, error)
+}
+
+// Pinger 是 Storage 的**可选扩展**：周期性健康探测（数据库连接是否仍可用）。
+//
+// bootstrap 的存储巡检用它判断"当前可用"的存储是否已经掉线；不并进
+// Storage 接口同样是为了不破坏既有实现与测试替身。
+type Pinger interface {
+	Ping(ctx context.Context) error
 }
 
 // CaptureStore 抓包元数据存取接口。

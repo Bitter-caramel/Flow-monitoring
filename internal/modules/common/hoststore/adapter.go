@@ -27,7 +27,10 @@ type Adapter struct {
 	host plugin.Host
 }
 
-var _ storage.Storage = (*Adapter)(nil)
+var (
+	_ storage.Storage        = (*Adapter)(nil)
+	_ storage.CaptureCounter = (*captureStore)(nil)
+)
 
 // New 创建适配器。
 func New(host plugin.Host) *Adapter { return &Adapter{host: host} }
@@ -59,7 +62,27 @@ func (s *captureStore) Get(_ context.Context, id string) (*storage.CaptureRecord
 
 func (s *captureStore) List(_ context.Context, page storage.Page) (*storage.PageResult[storage.CaptureRecord], error) {
 	res := s.host.CaptureList(page)
+	if res.Err != "" {
+		// ★ 宿主明确说"存储不可用"时，绝不能伪装成空列表返回 nil error；
+		// 转成 Go error，让 query handler 映射成 503。
+		return nil, plugin.ErrStorageUnavailable
+	}
 	return &storage.PageResult[storage.CaptureRecord]{Items: res.Items, Total: res.Total}, nil
+}
+
+// Count 返回 capture 真实总条数（storage.CaptureCounter 可选扩展）。
+//
+// 宿主桥没有单独的 CaptureCount RPC；CaptureList 的 Total 在存储可用时
+// 就是真实条数（PG 实现已修复为 count(*)）。
+func (s *captureStore) Count(_ context.Context) (int, error) {
+	res := s.host.CaptureList(plugin.Page{Offset: 0, Limit: 1})
+	if res.Err != "" {
+		return 0, plugin.ErrStorageUnavailable
+	}
+	if res.Total < 0 {
+		return 0, plugin.ErrStorageUnavailable
+	}
+	return res.Total, nil
 }
 
 func (s *captureStore) Delete(_ context.Context, id string) error {
@@ -76,6 +99,9 @@ func (s *packetStore) SaveBatch(_ context.Context, captureID string, packets []s
 
 func (s *packetStore) ListByCapture(_ context.Context, captureID string, page storage.Page) (*storage.PageResult[storage.PacketRecord], error) {
 	res := s.host.PacketList(captureID, page)
+	if res.Err != "" {
+		return nil, plugin.ErrStorageUnavailable
+	}
 	return &storage.PageResult[storage.PacketRecord]{Items: res.Items, Total: res.Total}, nil
 }
 

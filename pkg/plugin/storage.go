@@ -46,13 +46,21 @@ type Page struct {
 // CapturePage 抓包元数据分页结果。
 type CapturePage struct {
 	Items []CaptureRecord
-	Total int // 总条数（-1 表示未统计）
+	Total int // 总条数；0 且有 Err 时表示"不可用"，不是"没有数据"
+	// Err 非空表示宿主存储不可用（或查询失败）。
+	//
+	// ★ 为什么不直接返回 error：CaptureList 走 net/rpc，方法签名固定为
+	// 单返回值；用 Err 字段把"存储不可用"如实带回模块进程，避免被误报成
+	// "没有数据"（项目红线）。
+	Err string `json:"err,omitempty"`
 }
 
 // PacketPage 数据包元数据分页结果。
 type PacketPage struct {
 	Items []PacketRecord
-	Total int // 总条数（-1 表示未统计）
+	Total int // 总条数；0 且有 Err 时表示"不可用"，不是"没有数据"
+	// Err 非空表示宿主存储不可用（或查询失败）。
+	Err string `json:"err,omitempty"`
 }
 
 // EventRecord 事件总线上的跨进程事件（gob 安全）。

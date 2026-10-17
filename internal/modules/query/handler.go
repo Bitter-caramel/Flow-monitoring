@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"flow-monitoring/internal/kernel/storage"
+	"flow-monitoring/pkg/plugin"
 )
 
 // pageResponse 分页响应体。
@@ -45,9 +46,24 @@ func (s *Service) handleListCaptures(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// ★ total 必须是真实条数，不再把 -1 哨兵透给前端。
+	// 正常实现（PG / hoststore）的 List 已返回真实 Total；这里再做一次
+	// 能力探测兜底，兼容仍返回 -1 的旧实现。
+	total := res.Total
+	if total < 0 {
+		if counter, ok := s.db.Captures().(storage.CaptureCounter); ok {
+			if n, err := counter.Count(r.Context()); err == nil {
+				total = n
+			}
+		}
+	}
+	if total < 0 {
+		// 最后一层兜底：当前页不满 ⇒ 不可能还有更多记录。
+		total = page.Offset + len(res.Items)
+	}
 	writeJSON(w, http.StatusOK, pageResponse[storage.CaptureRecord]{
 		Items:  res.Items,
-		Total:  res.Total,
+		Total:  total,
 		Offset: page.Offset,
 		Limit:  page.Limit,
 	})
@@ -76,11 +92,13 @@ func (s *Service) handleListPackets(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	// total 为 -1（未统计）时主动统计
+	// total 为 -1（未统计）时主动统计；统计失败也不能把 -1 透给前端。
 	total := res.Total
 	if total < 0 {
 		if n, err := s.CountPackets(r.Context(), id); err == nil {
 			total = n
+		} else {
+			total = page.Offset + len(res.Items)
 		}
 	}
 	writeJSON(w, http.StatusOK, pageResponse[storage.PacketRecord]{
@@ -111,6 +129,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // writeError 输出错误（RFC 7807 风格简化版）。
 func writeError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, plugin.ErrStorageUnavailable):
+		// ★ 存储不可用必须明确告诉调用方（503），绝不能伪装成 200 + 空列表。
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "storage unavailable"})
 	case errors.Is(err, storage.ErrNotFound):
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	default:

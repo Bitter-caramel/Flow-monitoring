@@ -85,8 +85,19 @@ type Bridge struct {
 	cfg    *config.Config
 	logger *logging.Logger
 	bus    *eventbus.Bus
-	db     storage.Storage
 	log    *EventLog
+
+	// db 是运行期可替换的存储句柄（数据库断开/恢复时由 bootstrap 的
+	// storageWatch 调 SetDB 更新）。
+	//
+	// ★ 为什么用 sync.RWMutex 而不是普通字段：本机 `go test -race` 不可用，
+	// 而 SetDB（巡检 goroutine）与各存储方法（模块 RPC goroutine）会并发
+	// 读写此字段，必须显式同步，不能靠"应该没事"。
+	// ★ 为什么不用 atomic.Pointer：atomic.Pointer 只能存具体类型，存放
+	// storage.Storage 接口需要额外包一层且读取时仍要判空；RWMutex 在这里
+	// 更直观，也便于把"取快照"集中到 snapshotDB 一个入口。
+	dbMu sync.RWMutex
+	db   storage.Storage
 
 	mu         sync.RWMutex
 	routes     map[string]string            // HTTPBase -> 模块监听地址（网关反代用）
@@ -106,6 +117,27 @@ func NewBridge(cfg *config.Config, logger *logging.Logger, bus *eventbus.Bus, db
 		routeOwner: make(map[string]string),
 		svcs:       make(map[string]plugin.ServiceRef),
 	}
+}
+
+// SetDB 运行期替换存储句柄。
+//
+// db == nil 表示存储不可用（数据库断开）；非 nil 表示已恢复（巡检
+// Open+Migrate 成功后调用）。旧句柄由调用方（storageWatch）负责关闭，
+// 本方法不 Close，避免与巡检/退出流程重复关闭。
+func (b *Bridge) SetDB(db storage.Storage) {
+	b.dbMu.Lock()
+	b.db = db
+	b.dbMu.Unlock()
+}
+
+// snapshotDB 返回当前存储句柄快照。
+//
+// ★ 所有读取 b.db 的地方都必须走这里：先用 RLock 取一次快照，后续操作
+// 基于同一句柄，避免 setDB 在方法执行中途把 db 换掉/置空。
+func (b *Bridge) snapshotDB() storage.Storage {
+	b.dbMu.RLock()
+	defer b.dbMu.RUnlock()
+	return b.db
 }
 
 // Config 返回配置快照（模块进程读）。
@@ -245,26 +277,29 @@ func (b *Bridge) Services() map[string]plugin.ServiceRef {
 
 // CaptureCreate 写入抓包元数据索引（模块进程写盘后调用）。
 func (b *Bridge) CaptureCreate(rec plugin.CaptureRecord) error {
-	if b.db == nil {
-		return plugin.ErrNotRunning
+	db := b.snapshotDB()
+	if db == nil {
+		return plugin.ErrStorageUnavailable
 	}
-	return b.db.Captures().Create(context.Background(), &rec)
+	return db.Captures().Create(context.Background(), &rec)
 }
 
 // PacketSaveBatch 批量写入包元数据索引。
 func (b *Bridge) PacketSaveBatch(captureID string, packets []plugin.PacketRecord) error {
-	if b.db == nil {
-		return plugin.ErrNotRunning
+	db := b.snapshotDB()
+	if db == nil {
+		return plugin.ErrStorageUnavailable
 	}
-	return b.db.Packets().SaveBatch(context.Background(), captureID, packets)
+	return db.Packets().SaveBatch(context.Background(), captureID, packets)
 }
 
 // CaptureGet 查询抓包元数据。
 func (b *Bridge) CaptureGet(id string) (plugin.CaptureRecord, bool) {
-	if b.db == nil {
+	db := b.snapshotDB()
+	if db == nil {
 		return plugin.CaptureRecord{}, false
 	}
-	rec, err := b.db.Captures().Get(context.Background(), id)
+	rec, err := db.Captures().Get(context.Background(), id)
 	if err != nil {
 		return plugin.CaptureRecord{}, false
 	}
@@ -273,42 +308,52 @@ func (b *Bridge) CaptureGet(id string) (plugin.CaptureRecord, bool) {
 
 // CaptureList 分页列出抓包。
 func (b *Bridge) CaptureList(page plugin.Page) plugin.CapturePage {
-	if b.db == nil {
-		return plugin.CapturePage{Total: -1}
+	db := b.snapshotDB()
+	if db == nil {
+		// ★ 不可用 ≠ 没有数据：Total 用 0 且 Err 明确写出原因，
+		// 由 hoststore 转成 Go error，最终映射为 HTTP 503。
+		return plugin.CapturePage{Total: 0, Err: plugin.ErrStorageUnavailable.Error()}
 	}
-	res, err := b.db.Captures().List(context.Background(), storage.Page{Offset: page.Offset, Limit: page.Limit})
+	res, err := db.Captures().List(context.Background(), storage.Page{Offset: page.Offset, Limit: page.Limit})
 	if err != nil {
-		return plugin.CapturePage{Total: -1}
+		return plugin.CapturePage{Total: 0, Err: err.Error()}
 	}
 	return plugin.CapturePage{Items: res.Items, Total: res.Total}
 }
 
 // CaptureDelete 删除抓包。
 func (b *Bridge) CaptureDelete(id string) error {
-	if b.db == nil {
-		return plugin.ErrNotRunning
+	db := b.snapshotDB()
+	if db == nil {
+		return plugin.ErrStorageUnavailable
 	}
-	return b.db.Captures().Delete(context.Background(), id)
+	return db.Captures().Delete(context.Background(), id)
 }
 
 // PacketList 分页列出数据包元数据。
 func (b *Bridge) PacketList(captureID string, page plugin.Page) plugin.PacketPage {
-	if b.db == nil {
-		return plugin.PacketPage{Total: -1}
+	db := b.snapshotDB()
+	if db == nil {
+		return plugin.PacketPage{Total: 0, Err: plugin.ErrStorageUnavailable.Error()}
 	}
-	res, err := b.db.Packets().ListByCapture(context.Background(), captureID, storage.Page{Offset: page.Offset, Limit: page.Limit})
+	res, err := db.Packets().ListByCapture(context.Background(), captureID, storage.Page{Offset: page.Offset, Limit: page.Limit})
 	if err != nil {
-		return plugin.PacketPage{Total: -1}
+		return plugin.PacketPage{Total: 0, Err: err.Error()}
 	}
 	return plugin.PacketPage{Items: res.Items, Total: res.Total}
 }
 
 // PacketCount 统计某抓包的包数。
+//
+// 注意：Host 契约的 PacketCount 没有 error 返回值，不可用时只能返回 0；
+// 调用方（query handler）先调 PacketList，后者会用 Err 明确报告不可用，
+// 因此不会把"存储不可用"误判成"包里没有数据"。
 func (b *Bridge) PacketCount(captureID string) int {
-	if b.db == nil {
+	db := b.snapshotDB()
+	if db == nil {
 		return 0
 	}
-	n, err := b.db.Packets().Count(context.Background(), captureID)
+	n, err := db.Packets().Count(context.Background(), captureID)
 	if err != nil {
 		return 0
 	}
@@ -317,8 +362,9 @@ func (b *Bridge) PacketCount(captureID string) int {
 
 // PacketDelete 删除某抓包的全部包元数据。
 func (b *Bridge) PacketDelete(captureID string) error {
-	if b.db == nil {
-		return plugin.ErrNotRunning
+	db := b.snapshotDB()
+	if db == nil {
+		return plugin.ErrStorageUnavailable
 	}
-	return b.db.Packets().DeleteByCapture(context.Background(), captureID)
+	return db.Packets().DeleteByCapture(context.Background(), captureID)
 }
