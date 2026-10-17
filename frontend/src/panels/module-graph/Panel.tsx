@@ -115,6 +115,8 @@ export function ModuleGraphPanel() {
     try {
       const res = stop ? await postModuleDisable(node.id) : await postModuleEnable(node.id)
       setResult(res)
+      // ★ 启停成功 ⇒ 广播：shell 重拉 /api/modules 并刷新面板可用性（置灰/恢复入口）。
+      window.dispatchEvent(new Event('fm:modules-changed'))
       setPending(null)
       try {
         const next = await fetchModulesGraph()

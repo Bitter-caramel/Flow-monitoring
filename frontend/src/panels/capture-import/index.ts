@@ -15,6 +15,7 @@ registerPanel(
     description: '上传 pcap/pcapng 文件并查看 capture 列表',
     layer: 'L1',
     icon: '⇪',
+    moduleId: 'modules.importer',
   },
   CaptureImportPanel,
 )

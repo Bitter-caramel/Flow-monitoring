@@ -18,7 +18,8 @@
  *
  * 整体高度撑满（h-screen + flex-col），仅工作区 overflow-auto ⇒ 顶栏/导航/状态栏固定。
  */
-import { panelRegistry } from './registry'
+import { useEffect, useState } from 'react'
+import { isAvailable, panelRegistry, setEnabledModules } from './registry'
 import type { PanelPlugin } from './registry'
 import { LayerNav } from './LayerNav'
 import { TopBar } from './TopBar'
@@ -34,8 +35,23 @@ export function App() {
   // 全局状态只请求一次，顶栏与状态栏共用（避免重复打后端）。
   const status = useAppStatus()
 
+  // 注册表是外部可变状态：setEnabledModules 后递增一次版本号，让导航/工作区按新可用性重渲染。
+  const [, setAvailabilityVersion] = useState(0)
+
+  useEffect(() => {
+    // online 有模块数据 ⇒ 用已启用模块 id；loading/offline ⇒ null（状态未知，一律可用，不因不知道就全灰）。
+    if (status.state === 'online') {
+      setEnabledModules(status.modules.filter((m) => m.enabled).map((m) => m.id))
+    } else {
+      setEnabledModules(null)
+    }
+    setAvailabilityVersion((v) => v + 1)
+  }, [status.state, status.modules])
+
   const active: PanelPlugin | undefined = panelRegistry.query(activeId)
   const ActiveComponent = active?.component
+  // ★ 不可用也不改选（仍停在它），只把工作区换成占位提示（不空白、不报错）。
+  const activeAvailable = active !== undefined && isAvailable(active)
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-app text-fg">
@@ -46,11 +62,22 @@ export function App() {
 
         <main className="min-w-0 flex-1 overflow-auto p-4">
           {ActiveComponent ? (
-            // ★ 面板级错误边界：任何一个面板渲染崩溃都只影响它自己，不许把整个控制台打白。
-            //   key=activeId ⇒ 切面板时边界重建、错误状态自动复位。
-            <PanelErrorBoundary key={activeId} label={active?.manifest.name}>
-              <ActiveComponent />
-            </PanelErrorBoundary>
+            activeAvailable ? (
+              // ★ 面板级错误边界：任何一个面板渲染崩溃都只影响它自己，不许把整个控制台打白。
+              //   key=activeId ⇒ 切面板时边界重建、错误状态自动复位。
+              <PanelErrorBoundary key={activeId} label={active?.manifest.name}>
+                <ActiveComponent />
+              </PanelErrorBoundary>
+            ) : (
+              // 模块停用 ⇒ 入口置灰且当前工作区给占位提示（不空白、不报错、不改选）。
+              <div className="flex h-full items-center justify-center px-4 text-center text-dim">
+                <span>
+                  该面板所属模块{' '}
+                  <span className="mono">{active?.manifest.moduleId}</span>{' '}
+                  未启用 —— 去「模块拓扑」里启用它
+                </span>
+              </div>
+            )
           ) : (
             <div className="flex h-full items-center justify-center text-dim">请注册至少一个面板</div>
           )}

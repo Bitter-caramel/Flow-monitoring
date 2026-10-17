@@ -28,6 +28,12 @@ export interface PanelManifest {
   layer: PanelLayer
   /** 导航图标（emoji 或短字符，轻量 UI 不用图标库）。 */
   icon?: string
+  /**
+   * 所属后端模块 ID（如 "modules.query"）。
+   * 缺省 = 与模块无关（宿主面板），永远可用；
+   * 非缺省时由后端 /api/modules 的 enabled 状态决定入口是否可用（置灰而非隐藏）。
+   */
+  moduleId?: string
 }
 
 /** 语义化版本比较：a 是否兼容 b（同 major 且 minor >=）。 */

@@ -91,7 +91,7 @@ export function useAppStatus(): AppStatus {
       setSelfcheck(reportRes.value)
       setState('online')
       setError('')
-      setLastUpdated(Date.now())
+      setLastUpdated(new Date().getTime())
     } catch (e) {
       if (seq !== seqRef.current) return
       setModules([])
@@ -109,6 +109,18 @@ export function useAppStatus(): AppStatus {
     // 卸载（含 StrictMode 的重跑）时递增序号，令在途请求结果失效。
     return () => {
       seqRef.current++
+    }
+  }, [refresh])
+
+  // ★ 模块启停成功后由 module-graph 面板广播；复用 refresh 重拉三个接口，
+  //   让状态栏与面板可用性（registry.setEnabledModules）立即跟上。
+  useEffect(() => {
+    const onModulesChanged = () => {
+      void refresh()
+    }
+    window.addEventListener('fm:modules-changed', onModulesChanged)
+    return () => {
+      window.removeEventListener('fm:modules-changed', onModulesChanged)
     }
   }, [refresh])
 

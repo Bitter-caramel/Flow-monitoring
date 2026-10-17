@@ -15,6 +15,7 @@ registerPanel(
     description: '按 capture 分页查看数据包（Wireshark 风格）',
     layer: 'L1',
     icon: '▤',
+    moduleId: 'modules.query',
   },
   PacketListPanel,
 )

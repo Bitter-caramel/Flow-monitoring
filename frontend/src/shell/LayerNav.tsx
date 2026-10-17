@@ -13,7 +13,7 @@
  *   - 键盘（设计文档 §1"键盘优先"）：↑/↓ 在可见面板间移动、Enter 选中（Home/End 到首尾）。
  */
 import { useRef, useState } from 'react'
-import { panelRegistry } from './registry'
+import { isAvailable, panelRegistry } from './registry'
 import type { PanelPlugin } from './registry'
 import type { PanelLayer } from './manifest'
 
@@ -50,40 +50,76 @@ export function LayerNav({ activeId, onSelect }: LayerNavProps) {
   const ordered: PanelPlugin[] = LAYER_ORDER.flatMap((layer) => byLayer.get(layer) ?? [])
 
   const [cursor, setCursor] = useState(() => {
+    // 初始光标优先停在当前面板；若它不可用（所属模块停用），退到第一个可用项，
+    // 避免 roving tabindex 落到 disabled 按钮上，导致键盘无法进入导航。
     const i = ordered.findIndex((p) => p.manifest.id === activeId)
-    return i >= 0 ? i : 0
+    if (i >= 0 && isAvailable(ordered[i])) return i
+    const first = ordered.findIndex((p) => isAvailable(p))
+    return first >= 0 ? first : 0
   })
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
 
+  /** 某个下标的条目当前是否可用（越界视为不可用）。 */
+  function usableAt(index: number): boolean {
+    const p = ordered[index]
+    return p !== undefined && isAvailable(p)
+  }
+
+  // 有效光标：只落在可用项上；可用性变化令原 cursor 失效时，本次渲染回退到第一个可用项。
+  const effectiveCursor = usableAt(cursor) ? cursor : ordered.findIndex((p) => isAvailable(p))
+
+  /** 从 from 出发沿 dir 找下一个可用项（不越过首尾，找不到返回 -1）。 */
+  function findAvailable(from: number, dir: 1 | -1): number {
+    for (let i = from + dir; i >= 0 && i < ordered.length; i += dir) {
+      if (isAvailable(ordered[i])) return i
+    }
+    return -1
+  }
+
   function focusItem(index: number) {
-    if (ordered.length === 0) return
-    const clamped = Math.min(Math.max(index, 0), ordered.length - 1)
-    setCursor(clamped)
-    itemRefs.current[clamped]?.focus()
+    if (index < 0 || index >= ordered.length) return
+    setCursor(index)
+    itemRefs.current[index]?.focus()
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLElement>) {
     switch (e.key) {
-      case 'ArrowDown':
+      case 'ArrowDown': {
         e.preventDefault()
-        focusItem(cursor + 1)
+        if (effectiveCursor < 0) break
+        const next = findAvailable(effectiveCursor, 1)
+        if (next >= 0) focusItem(next) // 找不到就停在原地，绝不停到灰条目上
         break
-      case 'ArrowUp':
+      }
+      case 'ArrowUp': {
         e.preventDefault()
-        focusItem(cursor - 1)
+        if (effectiveCursor < 0) break
+        const prev = findAvailable(effectiveCursor, -1)
+        if (prev >= 0) focusItem(prev)
         break
-      case 'Home':
+      }
+      case 'Home': {
         e.preventDefault()
-        focusItem(0)
+        const first = ordered.findIndex((p) => isAvailable(p))
+        if (first >= 0) focusItem(first)
         break
-      case 'End':
+      }
+      case 'End': {
         e.preventDefault()
-        focusItem(ordered.length - 1)
+        let last = -1
+        for (let i = ordered.length - 1; i >= 0; i -= 1) {
+          if (isAvailable(ordered[i])) {
+            last = i
+            break
+          }
+        }
+        if (last >= 0) focusItem(last)
         break
+      }
       case 'Enter': {
         e.preventDefault()
-        const picked = ordered[cursor]
-        if (picked) onSelect(picked.manifest.id)
+        const picked = ordered[effectiveCursor]
+        if (picked && isAvailable(picked)) onSelect(picked.manifest.id)
         break
       }
       default:
@@ -117,6 +153,8 @@ export function LayerNav({ activeId, onSelect }: LayerNavProps) {
                     flatIndex += 1
                     const idx = flatIndex
                     const active = p.manifest.id === activeId
+                    const available = isAvailable(p)
+                    // 模块停用 ⇒ 置灰 + 不可点（不隐藏：让"能力存在但没开"可见）。
                     return (
                       <li key={p.manifest.id}>
                         <button
@@ -124,14 +162,23 @@ export function LayerNav({ activeId, onSelect }: LayerNavProps) {
                           ref={(el) => {
                             itemRefs.current[idx] = el
                           }}
-                          tabIndex={idx === cursor ? 0 : -1}
+                          tabIndex={idx === effectiveCursor ? 0 : -1}
                           aria-current={active ? 'page' : undefined}
-                          title={p.manifest.description}
+                          disabled={!available}
+                          title={
+                            available
+                              ? p.manifest.description
+                              : `模块 ${p.manifest.moduleId ?? ''} 未启用`
+                          }
                           onClick={() => onSelect(p.manifest.id)}
                           onFocus={() => setCursor(idx)}
                           className={`flex w-full items-center gap-2 rounded-xs px-2 py-1.5 text-left text-base ${
-                            active ? 'bg-accent text-accent-fg' : 'text-fg hover:bg-elevated'
-                          }`}
+                            active
+                              ? 'bg-accent text-accent-fg'
+                              : available
+                                ? 'text-fg hover:bg-elevated'
+                                : 'text-fg'
+                          } ${available ? '' : 'cursor-not-allowed opacity-60'}`}
                         >
                           <span className="w-[18px] text-center">{p.manifest.icon ?? '▫'}</span>
                           <span className="flex-1 truncate">{p.manifest.name}</span>

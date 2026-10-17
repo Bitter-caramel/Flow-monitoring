@@ -29,6 +29,34 @@ class PanelRegistry {
   private panels = new Map<string, PanelPlugin>()
 
   /**
+   * 已启用的后端模块 ID；null = 尚未加载/离线（此时一律视为可用，不许因为不知道就全灰）。
+   * ★ 只影响 isAvailable()，不影响 list/query/listByLayer 的返回（入口置灰而非消失）。
+   */
+  private enabledModuleIds: string[] | null = null
+
+  /**
+   * 更新已启用的模块集合。
+   * ids === null 代表后端状态未知（加载中/离线）⇒ 所有面板可用。
+   */
+  setEnabledModules(ids: string[] | null): void {
+    this.enabledModuleIds = ids === null ? null : [...new Set(ids)]
+  }
+
+  /**
+   * 面板是否可用（唯一可用性规则，导航与工作区共用）。
+   *   - manifest.moduleId 缺省 ⇒ true（与模块无关，永远可用）；
+   *   - 模块集合未知（null）⇒ true（不因离线而全灰）；
+   *   - 模块集合已知 ⇒ 该 moduleId 在启用集合中。
+   */
+  isAvailable(pluginOrManifest: PanelPlugin | PanelManifest): boolean {
+    const manifest = 'manifest' in pluginOrManifest ? pluginOrManifest.manifest : pluginOrManifest
+    const { moduleId } = manifest
+    if (!moduleId) return true
+    if (this.enabledModuleIds === null) return true
+    return this.enabledModuleIds.includes(moduleId)
+  }
+
+  /**
    * 注册一个面板插件。
    *
    * 默认：重复 id 视为冲突（抛错），保护内置面板不被误覆盖。
@@ -128,6 +156,16 @@ class PanelRegistry {
 
 /** 全局默认注册表（面板模块在导入时自注册）。 */
 export const panelRegistry = new PanelRegistry()
+
+/** 更新全局默认注册表的已启用模块集合（null = 状态未知/离线，全部可用）。 */
+export function setEnabledModules(ids: string[] | null): void {
+  panelRegistry.setEnabledModules(ids)
+}
+
+/** 判断面板/ manifest 是否可用（全局默认注册表，唯一可用性规则）。 */
+export function isAvailable(pluginOrManifest: PanelPlugin | PanelManifest): boolean {
+  return panelRegistry.isAvailable(pluginOrManifest)
+}
 
 /** 面板自注册入口（面板模块调用，等价后端的 init() 注册）。 */
 export function registerPanel(
