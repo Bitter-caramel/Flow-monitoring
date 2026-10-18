@@ -203,6 +203,16 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 	})
 	alerts.Register(ts)
 
+	// 告警实时推送（任务 15-3）：WebSocket 端点 + OnAlert 钩子。
+	// ★ 必须传显式的同源校验：传 nil 会让 gorilla 的默认 CheckOrigin 放行任意来源，
+	//   等于给控制面开 CSRF 口子（浏览器 WS 握手一定带 Origin，空 Origin 只可能是非浏览器客户端）。
+	// ★ BroadcastJSON 是同步遍历连接逐个 Send，但 alerting 内部用有界通道 + 独立
+	//   goroutine 派发，慢客户端只会拖住派发 goroutine，不会反压告警订阅循环。
+	alertsHub := ts.HandleWS("/api/ws/alerts", transport.SameOriginCheck)
+	alerts.SetOnAlert(func(a alerting.Alert) {
+		alertsHub.BroadcastJSON(map[string]any{"type": "alert", "data": a})
+	})
+
 	return &App{
 		Cfg:          cfg,
 		Logger:       logger,

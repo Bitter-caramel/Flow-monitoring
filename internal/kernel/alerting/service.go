@@ -10,12 +10,21 @@ import (
 	"flow-monitoring/internal/kernel/eventbus"
 )
 
+// DefaultPushBuffer 是 OnAlert 派发通道的默认缓冲容量（Config.PushBuffer <= 0 时使用）。
+//
+// ★ 必须是有界缓冲：WS 广播是同步遍历所有连接逐个 Send，慢客户端会阻塞调用方，
+//
+//	所以告警消费循环只能"投递到通道就返回"，缓冲满时丢弃并计数，绝不反压消费。
+const DefaultPushBuffer = 256
+
 // Config 是 alerting 服务的装配配置。
 type Config struct {
 	// Capacity 是环形缓冲容量（沿用 config.Detect.AlertBuffer；<=0 用默认值）。
 	Capacity int
 	// Logger 可选：nil 时退回 slog.Default()（解析失败的日志不能静默丢）。
 	Logger *slog.Logger
+	// PushBuffer 是 OnAlert 派发通道的缓冲容量（<=0 用 DefaultPushBuffer）。
+	PushBuffer int
 }
 
 // Stats 是 /api/alerts/stats 的响应体。
@@ -23,11 +32,13 @@ type Config struct {
 // ★ 15-2b 起宿主不再加载规则、也不再跑回放：rules_total / rules_by_source /
 // replay 这些它不知道的信息被移除，留着就是撒谎。
 type Stats struct {
-	Enabled      bool   `json:"enabled"`
-	AlertsTotal  int    `json:"alerts_total"`
-	Capacity     int    `json:"capacity"`
-	Received     uint64 `json:"received"`
-	Dropped      uint64 `json:"dropped"`
+	Enabled     bool   `json:"enabled"`
+	AlertsTotal int    `json:"alerts_total"`
+	Capacity    int    `json:"capacity"`
+	Received    uint64 `json:"received"`
+	Dropped     uint64 `json:"dropped"`
+	// PushDropped 是 OnAlert 派发通道满时丢弃的条数（有界缓冲，绝不反压消费）。
+	PushDropped  uint64 `json:"push_dropped"`
 	DecodeErrors uint64 `json:"decode_errors"`
 	LastError    string `json:"last_error"`
 }
@@ -36,6 +47,8 @@ type Stats struct {
 type Service struct {
 	ring   *ring
 	logger *slog.Logger
+	// pushBuf 是 OnAlert 派发通道的容量（构造后不变）。
+	pushBuf int
 
 	mu        sync.Mutex
 	enabled   bool
@@ -46,6 +59,12 @@ type Service struct {
 	received  uint64
 	decodeErr uint64
 	lastError string
+	// onAlert 是分配 id 并写入环形缓冲后回调的钩子（可为 nil）。
+	onAlert func(Alert)
+	// pushCh 是有界派发通道；只由 consume goroutine 投递、dispatch goroutine 消费。
+	pushCh chan Alert
+	// pushDropped 是派发通道满时丢弃的条数（受 mu 保护）。
+	pushDropped uint64
 }
 
 // New 创建 alerting 服务（只装配环形缓冲与日志器，不启动订阅）。
@@ -54,10 +73,29 @@ func New(cfg Config) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{
-		ring:   newRing(cfg.Capacity),
-		logger: logger,
+	pushBuf := cfg.PushBuffer
+	if pushBuf <= 0 {
+		pushBuf = DefaultPushBuffer
 	}
+	return &Service{
+		ring:    newRing(cfg.Capacity),
+		logger:  logger,
+		pushBuf: pushBuf,
+	}
+}
+
+// SetOnAlert 注册告警回调：每条告警分配 id 并写入环形缓冲后调用。
+//
+// ★ 回调在独立 goroutine 里执行（经有界缓冲派发），不会阻塞事件消费循环；
+//
+//	缓冲满时丢弃并计入 Stats().PushDropped。传 nil 可关闭推送。
+func (s *Service) SetOnAlert(fn func(Alert)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onAlert = fn
+	s.mu.Unlock()
 }
 
 // Start 订阅 topic 并在后台 goroutine 里消费事件。
@@ -80,11 +118,14 @@ func (s *Service) Start(bus *eventbus.Bus, topic string) {
 	s.bus = bus
 	s.cancel = cancel
 	s.enabled = true
+	// 每次启动都重建派发通道，避免上次运行残留的告警被再次派发。
+	s.pushCh = make(chan Alert, s.pushBuf)
 	// ★ 在持锁时 Add，保证 Stop 的 Wait 不会与 Add 竞态。
-	s.wg.Add(1)
+	s.wg.Add(2)
 	s.mu.Unlock()
 
 	go s.consume(ctx, sub)
+	go s.dispatch(ctx, s.pushCh)
 }
 
 // Stop 取消消费 goroutine 并退订；幂等。
@@ -132,6 +173,7 @@ func (s *Service) Stats() Stats {
 	received := s.received
 	decodeErr := s.decodeErr
 	lastError := s.lastError
+	pushDropped := s.pushDropped
 	s.mu.Unlock()
 
 	return Stats{
@@ -140,6 +182,7 @@ func (s *Service) Stats() Stats {
 		Capacity:     s.ring.capacity(),
 		Received:     received,
 		Dropped:      s.ring.droppedCount(),
+		PushDropped:  pushDropped,
 		DecodeErrors: decodeErr,
 		LastError:    lastError,
 	}
@@ -180,7 +223,47 @@ func (s *Service) handle(ev eventbus.Event) {
 		s.recordDecodeError(fmt.Errorf("alerting: 解析 detect.feature 告警失败: %w", err))
 		return
 	}
-	s.ring.add(a)
+	rec := s.ring.add(a)
+	s.push(rec)
+}
+
+// push 把一条已入库的告警非阻塞地投递到派发通道。
+//
+// ★ 缓冲满时丢弃并计数，绝不阻塞调用方（consume 循环）；没有回调时直接跳过。
+func (s *Service) push(a Alert) {
+	s.mu.Lock()
+	hasSink := s.onAlert != nil
+	s.mu.Unlock()
+	if !hasSink {
+		return
+	}
+	select {
+	case s.pushCh <- a:
+	default:
+		s.mu.Lock()
+		s.pushDropped++
+		s.mu.Unlock()
+	}
+}
+
+// dispatch 在独立 goroutine 里消费派发通道并调用 OnAlert。
+//
+// 慢客户端（BroadcastJSON 同步 Send）只会阻塞这里，不会反压 consume 循环。
+func (s *Service) dispatch(ctx context.Context, ch <-chan Alert) {
+	defer s.wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case a := <-ch:
+			s.mu.Lock()
+			fn := s.onAlert
+			s.mu.Unlock()
+			if fn != nil {
+				fn(a)
+			}
+		}
+	}
 }
 
 // payloadBytes 把事件载荷统一成字节。

@@ -13,6 +13,7 @@ import { App } from './shell/App'
 import './panels/capture-import'
 import './panels/packet-list'
 import './panels/module-graph'
+import './panels/alert-list'
 
 // ★ 首帧前应用主题/密度：从 localStorage 读取已存偏好（键名见 shell/theme.ts：
 //   fm.theme / fm.density），写入 documentElement.dataset，避免"先深后浅"的闪烁（FOUC）。

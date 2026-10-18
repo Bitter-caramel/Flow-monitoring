@@ -2,6 +2,8 @@ package transport
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -138,6 +140,33 @@ func (h *WSHub) close() {
 	for _, c := range conns {
 		_ = c.Close()
 	}
+}
+
+// SameOriginCheck 是 WebSocket 握手的同源校验函数（可直接传给 HandleWS）。
+//
+// 规则（对应本任务的安全红线）：
+//   - 无 Origin 头 ⇒ 视为同源（非浏览器客户端，如命令行/测试）；
+//   - Origin 可解析且其 host（含端口）与请求 Host 一致 ⇒ 同源；
+//   - 其它一律拒绝。
+//
+// ★ 绝不能给 HandleWS 传 nil：gorilla 的默认 CheckOrigin 会放行任意来源，
+// 等于给控制面开 CSRF 口子。浏览器发起的 WS 握手一定带 Origin。
+func SameOriginCheck(r *http.Request) bool { return sameOriginCheck(r) }
+
+// sameOriginCheck 是 SameOriginCheck 的实际实现（同包测试可直接调用）。
+func sameOriginCheck(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
 }
 
 // HandleWS 注册 WebSocket 端点，返回集线器供业务模块广播。
