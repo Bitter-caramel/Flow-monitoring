@@ -32,6 +32,9 @@ type Runtime struct {
 	MakeHandler func(host Host) (http.Handler, error)
 	OnStart     func(host Host, cfg ConfigSnapshot) error
 	OnStop      func() error
+	// OnHealth 可选：模块自定义健康检查。为 nil 时 Health 恒返回 healthy，
+	// 保持既有模块零改动、向后兼容。
+	OnHealth func() HealthStatus
 
 	host     Host
 	cfg      ConfigSnapshot
@@ -139,8 +142,16 @@ func (r *Runtime) Stop() error {
 	return nil
 }
 
-// Health 返回运行态健康（进程存活即健康）。
-func (r *Runtime) Health() HealthStatus { return HealthStatus{Healthy: true} }
+// Health 返回运行态健康。
+//
+// OnHealth 为 nil 时保持旧行为（进程存活即健康），现有模块零影响；
+// 非 nil 时把真实状态交给模块自己判断。
+func (r *Runtime) Health() HealthStatus {
+	if r.OnHealth != nil {
+		return r.OnHealth()
+	}
+	return HealthStatus{Healthy: true}
+}
 
 // DialHostFromEnv 从环境变量回连宿主桥接服务。
 func DialHostFromEnv() (Host, error) {

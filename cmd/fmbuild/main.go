@@ -279,7 +279,7 @@ func guardHost(repo string, reg *registry.Registry, stdout, stderr io.Writer) in
 
 	fmt.Fprintf(stdout, "守卫: 检查宿主闭包 %d 个包\n", report.Checked)
 	for _, w := range report.Warnings {
-		fmt.Fprintf(stdout, "告警: %s (%s) 被 %s import（core 模块不可裁剪，仅提示）\n",
+		fmt.Fprintf(stdout, "告警: %s (%s) 被 %s import（core 或 inprocess 模块，不可作为可选模块裁剪，仅提示）\n",
 			w.ModuleID, w.Package, strings.Join(w.ImportedBy, ", "))
 	}
 	if len(report.Errors) == 0 {

@@ -1,0 +1,181 @@
+package alerting
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"flow-monitoring/internal/kernel/eventbus"
+)
+
+// muxRegistrar 把 *http.ServeMux 适配到 Registrar。
+// （ServeMux.HandleFunc 的第二个参数是未命名函数类型，与 http.HandlerFunc 不同，
+// 因此 ServeMux 本身不直接满足接口；生产侧 *transport.Server 的签名是一致的。）
+type muxRegistrar struct{ mux *http.ServeMux }
+
+func (m muxRegistrar) HandleFunc(pattern string, fn http.HandlerFunc) {
+	m.mux.HandleFunc(pattern, fn)
+}
+
+// newHTTPTestServer 把 Service 的两条路由挂到测试 mux 上。
+func newHTTPTestServer(t *testing.T, svc *Service) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	svc.Register(muxRegistrar{mux: mux})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func getJSON(t *testing.T, url string, out any) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want 200", url, resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		t.Fatalf("decode %s: %v", url, err)
+	}
+}
+
+// TestAlertsHTTPEmptyItemsIsArray 空缓冲时 items 必须是 []，不能是 null。
+func TestAlertsHTTPEmptyItemsIsArray(t *testing.T) {
+	svc := New(Config{Capacity: 10})
+	ts := newHTTPTestServer(t, svc)
+
+	resp, err := http.Get(ts.URL + "/api/alerts")
+	if err != nil {
+		t.Fatalf("GET /api/alerts: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var raw struct {
+		Items json.RawMessage `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := strings.TrimSpace(string(raw.Items)); got != "[]" {
+		t.Fatalf("items = %s, want []（nil slice 会序列化成 null，前端会白屏）", got)
+	}
+}
+
+// TestAlertsHTTPEmptyBodyShape 直接断言响应体中的 items 是数组字面量。
+func TestAlertsHTTPEmptyBodyShape(t *testing.T) {
+	svc := New(Config{Capacity: 10})
+	ts := newHTTPTestServer(t, svc)
+
+	resp, err := http.Get(ts.URL + "/api/alerts?since_id=999")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(resp.Body); err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"items":[]`) {
+		t.Fatalf("body = %s, want 包含 \"items\":[]", buf.String())
+	}
+}
+
+// TestAlertsStatsFieldsComplete stats 字段齐全，且不再含宿主不知道的 rules/replay 字段。
+func TestAlertsStatsFieldsComplete(t *testing.T) {
+	svc := New(Config{Capacity: 10})
+	ts := newHTTPTestServer(t, svc)
+
+	var m map[string]json.RawMessage
+	getJSON(t, ts.URL+"/api/alerts/stats", &m)
+
+	for _, k := range []string{
+		"enabled", "alerts_total", "capacity",
+		"received", "dropped", "decode_errors", "last_error",
+	} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("stats 缺少字段 %q", k)
+		}
+	}
+	// ★ 15-2b：宿主不再加载规则、不再跑回放，这些字段必须移除。
+	for _, k := range []string{"rules_total", "rules_by_source", "replay", "issues"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("stats 不应再含字段 %q（宿主不知道这些信息，留着就是撒谎）", k)
+		}
+	}
+
+	var st Stats
+	if err := json.Unmarshal(mustMarshal(t, m), &st); err != nil {
+		t.Fatalf("decode Stats: %v", err)
+	}
+	if st.Capacity != 10 {
+		t.Errorf("capacity = %d, want 10", st.Capacity)
+	}
+}
+
+// TestAlertsHTTPAfterPublish 通过总线投 3 条后 HTTP 查询：分页、since_id、page_size 上限。
+func TestAlertsHTTPAfterPublish(t *testing.T) {
+	bus := eventbus.New()
+	defer bus.Close()
+
+	svc := New(Config{Capacity: 1000})
+	svc.Start(bus, "detect.feature")
+	t.Cleanup(svc.Stop)
+
+	for i := 1; i <= 3; i++ {
+		if err := bus.Publish("detect.feature", alertJSON(fmt.Sprintf("r%d", i))); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	waitFor(t, 2*time.Second, func() bool { return svc.Stats().AlertsTotal == 3 })
+
+	ts := newHTTPTestServer(t, svc)
+
+	var page Page
+	getJSON(t, ts.URL+"/api/alerts", &page)
+	if page.Total != 3 || len(page.Items) != 3 {
+		t.Fatalf("total=%d items=%d, want 3/3", page.Total, len(page.Items))
+	}
+	for i, a := range page.Items {
+		if a.ID != uint64(i+1) {
+			t.Errorf("items[%d].ID = %d, want %d", i, a.ID, i+1)
+		}
+	}
+
+	// since_id 增量：只要 id > 2 的一条。
+	var inc Page
+	getJSON(t, ts.URL+"/api/alerts?since_id=2", &inc)
+	if inc.Total != 1 || len(inc.Items) != 1 || inc.Items[0].ID != 3 {
+		t.Fatalf("since_id=2 total=%d items=%v, want total=1 id=3", inc.Total, idsOf(inc.Items))
+	}
+
+	// page=0 归一到 1；超大 page_size 截到 500。
+	var clamped Page
+	getJSON(t, ts.URL+"/api/alerts?page=0&page_size=99999", &clamped)
+	if clamped.Page != 1 || clamped.PageSize != MaxPageSize {
+		t.Fatalf("page=%d page_size=%d, want 1/%d", clamped.Page, clamped.PageSize, MaxPageSize)
+	}
+
+	// stats 应反映消费结果。
+	var st Stats
+	getJSON(t, ts.URL+"/api/alerts/stats", &st)
+	if !st.Enabled || st.AlertsTotal != 3 || st.Received != 3 {
+		t.Fatalf("stats = %+v, want enabled=true alerts_total=3 received=3", st)
+	}
+}
+
+func mustMarshal(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}

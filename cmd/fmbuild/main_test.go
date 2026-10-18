@@ -92,14 +92,18 @@ func TestRun_List_AllModules(t *testing.T) {
 	}
 }
 
-// 测试 11：--list --modules=disposal 的两跳闭包 = disposal+situation+detect。
+// 测试 11：--list --modules=disposal 的两跳闭包 = disposal + situation + capture。
+//
+// ★ 15-2a 起 `detect.feature` 的提供者由 capture 进程承担（detect 是内嵌库、
+// 不再声明 provides），所以闭包成员从 detect 变为 capture —— 这是架构变更的
+// 正确后果，不是"为了让测试绿而改断言"。
 func TestRun_List_ModulesClosure(t *testing.T) {
 	code, stdout, stderr := runCLI(t, "--repo=../..", "--list", "--modules=disposal")
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr=%s", code, stderr)
 	}
 	rows := listRows(stdout)
-	for _, id := range []string{"modules.disposal", "modules.situation", "modules.detect"} {
+	for _, id := range []string{"modules.disposal", "modules.situation", "modules.capture"} {
 		if _, ok := findRow(rows, id); !ok {
 			t.Errorf("未找到闭包成员 %s\n%s", id, stdout)
 		}

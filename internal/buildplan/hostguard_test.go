@@ -207,10 +207,13 @@ func TestGuardHostDeps_RealRepo(t *testing.T) {
 		t.Errorf("Checked = %d, want > 300（防拿空表冒充通过）", report.Checked)
 	}
 	if len(report.Errors) != 0 {
-		t.Errorf("真实仓库 Errors = %+v, want none", report.Errors)
+		t.Errorf("真实仓库 Errors = %+v, want none（可选模块绝不能被宿主耦合）", report.Errors)
 	}
+
+	// ★ 15-2b：宿主不再 import detect/rule/hotpath（改为订阅事件总线），
+	// 因此真实仓库的 Warnings 必须为 0。任何告警都是回归，撤销 15-1 的放宽。
 	if len(report.Warnings) != 0 {
-		t.Errorf("真实仓库 Warnings = %+v, want none", report.Warnings)
+		t.Errorf("真实仓库 Warnings = %+v, want none（内核不得耦合任何业务模块）", report.Warnings)
 	}
 }
 

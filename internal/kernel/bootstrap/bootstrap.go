@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"flow-monitoring/internal/kernel/alerting"
 	"flow-monitoring/internal/kernel/config"
 	"flow-monitoring/internal/kernel/eventbus"
 	"flow-monitoring/internal/kernel/health"
@@ -34,6 +35,9 @@ import (
 	"flow-monitoring/internal/modules/store"
 )
 
+// detectFeatureTopic 是 capture 进程发布检测告警的事件主题（跨进程契约）。
+const detectFeatureTopic = "detect.feature"
+
 // App 应用实例（进程内基础设施 + 模块进程管理器）。
 type App struct {
 	Cfg          *config.Config
@@ -45,6 +49,7 @@ type App struct {
 	Manager      *pluginhost.Manager
 	Health       *health.Health
 	Transport    *transport.Server
+	Alerts       *alerting.Service
 	storageWatch *storageWatch
 }
 
@@ -190,6 +195,14 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 
 	transport.RegisterModulesAPI(ts, mctl)
 
+	// 宿主侧 alerting（任务 15-2b）：只订阅事件总线，不加载规则、不跑热路径。
+	// ★ 只追加/替换装配，不改既有模块启动顺序；解析失败由 Service 内部计数 + 日志。
+	alerts := alerting.New(alerting.Config{
+		Capacity: cfg.Detect.AlertBuffer,
+		Logger:   logger.Logger,
+	})
+	alerts.Register(ts)
+
 	return &App{
 		Cfg:          cfg,
 		Logger:       logger,
@@ -200,6 +213,7 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 		Manager:      mgr,
 		Health:       h,
 		Transport:    ts,
+		Alerts:       alerts,
 		storageWatch: watch,
 	}, nil
 }
@@ -209,6 +223,12 @@ func (a *App) Start(ctx context.Context) error {
 	// 存储巡检：随应用生命周期启动（立即跑一次，此后每 10s）。
 	if a.storageWatch != nil {
 		a.storageWatch.Start(ctx)
+	}
+
+	// ★ 先订阅 detect.feature 再启动模块：模块一启动可能立刻回放，
+	//   提前订阅才不会漏掉最早的几条告警。
+	if a.Alerts != nil {
+		a.Alerts.Start(a.Bus, detectFeatureTopic)
 	}
 
 	order, err := a.Registry.TopologicalSort()
@@ -250,6 +270,11 @@ func (a *App) Wait(ctx context.Context) error {
 // Shutdown 优雅关闭：逆序停模块进程 → 关事件总线 → 关日志文件。
 func (a *App) Shutdown(ctx context.Context) error {
 	a.Logger.Info("bootstrap shutting down")
+
+	// 先停宿主侧 alerting 订阅（Stop 幂等、会等待消费 goroutine 退出）。
+	if a.Alerts != nil {
+		a.Alerts.Stop()
+	}
 
 	if err := a.Transport.Shutdown(ctx); err != nil {
 		a.Logger.Error("transport shutdown", "err", err)

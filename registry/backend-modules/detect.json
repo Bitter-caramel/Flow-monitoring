@@ -4,6 +4,5 @@
   "version": "0.1.0",
   "layer": "L2",
   "enabled": false,
-  "inprocess": true,
-  "provides": ["detect.feature"]
+  "inprocess": true
 }

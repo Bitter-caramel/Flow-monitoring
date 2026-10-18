@@ -25,6 +25,41 @@ func TestDefault(t *testing.T) {
 	}
 }
 
+// TestDefault_Detect 检测配置的默认值：rules / 不回放 / 1000。
+func TestDefault_Detect(t *testing.T) {
+	c := Default()
+	if c.Detect.RulesDir != "rules" {
+		t.Errorf("Detect.RulesDir default = %q, want rules", c.Detect.RulesDir)
+	}
+	if c.Detect.ReplayFile != "" {
+		t.Errorf("Detect.ReplayFile default = %q, want empty", c.Detect.ReplayFile)
+	}
+	if c.Detect.AlertBuffer != 1000 {
+		t.Errorf("Detect.AlertBuffer default = %d, want 1000", c.Detect.AlertBuffer)
+	}
+}
+
+// TestLoad_DetectEnvOverride 验证 FLOW_DETECT_* 环境变量覆盖。
+func TestLoad_DetectEnvOverride(t *testing.T) {
+	t.Setenv("FLOW_DETECT_RULES_DIR", "myrules")
+	t.Setenv("FLOW_DETECT_REPLAY_FILE", "sample.pcapng")
+	t.Setenv("FLOW_DETECT_ALERT_BUFFER", "42")
+
+	c, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Detect.RulesDir != "myrules" {
+		t.Errorf("Detect.RulesDir = %q, want myrules", c.Detect.RulesDir)
+	}
+	if c.Detect.ReplayFile != "sample.pcapng" {
+		t.Errorf("Detect.ReplayFile = %q, want sample.pcapng", c.Detect.ReplayFile)
+	}
+	if c.Detect.AlertBuffer != 42 {
+		t.Errorf("Detect.AlertBuffer = %d, want 42", c.Detect.AlertBuffer)
+	}
+}
+
 // TestLoad_MissingFileReturnsDefault 缺失文件返回 Default（开发期零配置可启动）。
 func TestLoad_MissingFileReturnsDefault(t *testing.T) {
 	c, err := Load("")

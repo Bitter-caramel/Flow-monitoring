@@ -43,7 +43,7 @@ type HostDepIssue struct {
 type HostGuardReport struct {
 	Checked  int            // 宿主闭包里的包总数
 	Errors   []HostDepIssue // 可选（非 core）模块被耦合 ⇒ 必须让构建失败
-	Warnings []HostDepIssue // core 模块被耦合 ⇒ 只告警（core 本来就不可裁剪，但值得知道）
+	Warnings []HostDepIssue // core 或 inprocess 模块被耦合 ⇒ 只告警（这类模块不可作为可选模块裁剪，仅提示）
 }
 
 // ModulePackage 返回清单 id 对应的包路径（id 前缀 modules. 去掉）。

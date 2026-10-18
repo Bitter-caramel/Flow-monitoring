@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 )
 
 // Config 平台主配置。
@@ -25,11 +26,26 @@ type Config struct {
 	Auth        AuthConfig     `json:"auth"`
 	Database    DBConfig       `json:"database"`
 	Logging     LogConfig      `json:"logging"`
+	Detect      DetectConfig   `json:"detect"`
 	DataDir     string         `json:"data_dir"`        // 原始抓包文件目录
 	PluginDir   string         `json:"plugin_dir"`      // 模块进程二进制目录
 	ManifestDir string         `json:"manifest_dir"`    // 用户扩展模块清单目录（L3）
 	StaticDir   string         `json:"static_dir"`      // 前端构建产物目录（空=不托管）
 	Extra       map[string]any `json:"extra,omitempty"` // 模块自定义配置
+}
+
+// DetectConfig 热路径检测配置。
+//
+// 与 registry 声明的模块无关：它是宿主内核自带的最小检测回路
+// （规则目录 → hotpath → pcapng 回放 → 内存告警缓冲 → /api/alerts）。
+//
+//   - RulesDir 为空 ⇒ 完全跳过检测（不加载规则、不建引擎、不注册路由）；
+//   - ReplayFile 为空 ⇒ 不启动回放（但规则/查询接口仍可用）；
+//   - AlertBuffer <= 0 ⇒ 使用默认容量 1000。
+type DetectConfig struct {
+	RulesDir    string `json:"rules_dir"`    // 默认 "rules"；空则跳过检测
+	ReplayFile  string `json:"replay_file"`  // 默认 ""（不回放）；非空才启动回放
+	AlertBuffer int    `json:"alert_buffer"` // 默认 1000；<=0 用默认值
 }
 
 // AuthConfig 控制面鉴权配置。
@@ -98,6 +114,11 @@ func Default() *Config {
 			MaxSize:  100,
 			MaxFiles: 7,
 		},
+		Detect: DetectConfig{
+			RulesDir:    "rules",
+			ReplayFile:  "",
+			AlertBuffer: 1000,
+		},
 		DataDir:     "data",
 		PluginDir:   "bin/plugins",
 		ManifestDir: "registry/backend-modules",
@@ -157,6 +178,19 @@ func applyEnv(c *Config) *Config {
 	// 用 LookupEnv：允许"显式设为空"来表达"不启用 Token 鉴权"。
 	if v, ok := os.LookupEnv("FLOW_API_TOKEN"); ok {
 		c.Auth.Token = v
+	}
+	// 热路径检测（宿主内核算）：规则目录 / 回放文件 / 告警缓冲容量。
+	// 三个都用 LookupEnv：显式空串对"跳过检测/不回放"是有意义的取值。
+	if v, ok := os.LookupEnv("FLOW_DETECT_RULES_DIR"); ok {
+		c.Detect.RulesDir = v
+	}
+	if v, ok := os.LookupEnv("FLOW_DETECT_REPLAY_FILE"); ok {
+		c.Detect.ReplayFile = v
+	}
+	if v, ok := os.LookupEnv("FLOW_DETECT_ALERT_BUFFER"); ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Detect.AlertBuffer = n
+		}
 	}
 	switch os.Getenv("FLOW_DEBUG") {
 	case "1", "true", "TRUE", "True":

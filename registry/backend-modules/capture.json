@@ -1,10 +1,10 @@
 {
   "id": "modules.capture",
-  "core": true,
+  "core": false,
   "name": "采集抽象",
   "version": "0.1.0",
   "layer": "L1",
-  "enabled": false,
+  "enabled": true,
   "binary": "capture",
-  "provides": ["capture.core"]
+  "provides": ["capture.core", "detect.feature"]
 }
