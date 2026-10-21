@@ -27,6 +27,7 @@ import { StatusBar } from './StatusBar'
 import { useAppStatus } from './useAppStatus'
 import { useActivePanel } from './useActivePanel'
 import { PanelErrorBoundary } from './ErrorBoundary'
+import { WorkbenchProvider } from './workbench'
 
 export function App() {
   // ★ 当前工作台/面板来自 URL（hash 路由，URL 是唯一数据源）：刷新保持、可分享、可前进后退。
@@ -61,32 +62,34 @@ export function App() {
         onSelectWorkbench={selectWorkbench}
       />
 
-      <div className="flex min-h-0 flex-1">
-        <SideNav workbench={workbench} activeId={activeId} onSelect={selectPanel} />
+      <WorkbenchProvider value={workbench}>
+        <div className="flex min-h-0 flex-1">
+          <SideNav workbench={workbench} activeId={activeId} onSelect={selectPanel} />
 
-        <main className="min-w-0 flex-1 overflow-auto p-4">
-          {ActiveComponent ? (
-            activeAvailable ? (
-              // ★ 面板级错误边界：任何一个面板渲染崩溃都只影响它自己，不许把整个控制台打白。
-              //   key=activeId ⇒ 切面板时边界重建、错误状态自动复位。
-              <PanelErrorBoundary key={activeId} label={active?.manifest.name}>
-                <ActiveComponent />
-              </PanelErrorBoundary>
+          <main className="min-w-0 flex-1 overflow-auto p-4">
+            {ActiveComponent ? (
+              activeAvailable ? (
+                // ★ 面板级错误边界：任何一个面板渲染崩溃都只影响它自己，不许把整个控制台打白。
+                //   key=activeId ⇒ 切面板时边界重建、错误状态自动复位。
+                <PanelErrorBoundary key={activeId} label={active?.manifest.name}>
+                  <ActiveComponent />
+                </PanelErrorBoundary>
+              ) : (
+                // 模块停用 ⇒ 入口置灰且当前工作区给占位提示（不空白、不报错、不改选）。
+                <div className="flex h-full items-center justify-center px-4 text-center text-dim">
+                  <span>
+                    该面板所属模块{' '}
+                    <span className="mono">{active?.manifest.moduleId}</span>{' '}
+                    未启用 —— 去「控制台」里启用它
+                  </span>
+                </div>
+              )
             ) : (
-              // 模块停用 ⇒ 入口置灰且当前工作区给占位提示（不空白、不报错、不改选）。
-              <div className="flex h-full items-center justify-center px-4 text-center text-dim">
-                <span>
-                  该面板所属模块{' '}
-                  <span className="mono">{active?.manifest.moduleId}</span>{' '}
-                  未启用 —— 去「控制台」里启用它
-                </span>
-              </div>
-            )
-          ) : (
-            <div className="flex h-full items-center justify-center text-dim">请注册至少一个面板</div>
-          )}
-        </main>
-      </div>
+              <div className="flex h-full items-center justify-center text-dim">请注册至少一个面板</div>
+            )}
+          </main>
+        </div>
+      </WorkbenchProvider>
 
       <StatusBar status={status} />
     </div>

@@ -39,7 +39,7 @@ func TestServiceOnAlertReceivesAssignedID(t *testing.T) {
 			t.Fatalf("OnAlert 回调字段错误: %+v", a)
 		}
 		// 回调里的 id 必须与环形缓冲里的记录一致（分配发生在入库时）。
-		if p := svc.Query(1, 10, 0); p.Total != 1 || p.Items[0].ID != a.ID {
+		if p := svc.Query(1, 10, 0, Filter{}); p.Total != 1 || p.Items[0].ID != a.ID {
 			t.Fatalf("Query = %+v, want 与回调一致的 id=%d", p, a.ID)
 		}
 	case <-time.After(2 * time.Second):

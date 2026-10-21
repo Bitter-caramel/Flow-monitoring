@@ -41,6 +41,11 @@ type Stats struct {
 	PushDropped  uint64 `json:"push_dropped"`
 	DecodeErrors uint64 `json:"decode_errors"`
 	LastError    string `json:"last_error"`
+
+	// ByMode / ByRun 是环形缓冲里按 mode / run_id 分组的条数（空值不计）。
+	// 始终非 nil（空缓冲为 {}），避免 JSON 序列化成 null。
+	ByMode map[string]int `json:"by_mode"`
+	ByRun  map[string]int `json:"by_run"`
 }
 
 // Service 只订阅 detect.feature 事件并缓存告警，不加载规则、不跑热路径。
@@ -154,18 +159,18 @@ func (s *Service) Stop() {
 	}
 }
 
-// Query 按 id 升序返回一页告警（参数语义见 ring.query）。
-func (s *Service) Query(page, pageSize int, sinceID uint64) Page {
+// Query 按 id 升序返回一页告警（可选按 mode/run_id 过滤，见 ring.query）。
+func (s *Service) Query(page, pageSize int, sinceID uint64, f Filter) Page {
 	if s == nil {
 		return Page{Items: []Alert{}, Page: 1, PageSize: DefaultPageSize}
 	}
-	return s.ring.query(page, pageSize, sinceID)
+	return s.ring.query(page, pageSize, sinceID, f)
 }
 
 // Stats 返回当前状态快照（并发安全）。
 func (s *Service) Stats() Stats {
 	if s == nil {
-		return Stats{}
+		return Stats{ByMode: map[string]int{}, ByRun: map[string]int{}}
 	}
 
 	s.mu.Lock()
@@ -176,6 +181,8 @@ func (s *Service) Stats() Stats {
 	pushDropped := s.pushDropped
 	s.mu.Unlock()
 
+	byMode, byRun := s.ring.groupCounts()
+
 	return Stats{
 		Enabled:      enabled,
 		AlertsTotal:  s.ring.len(),
@@ -185,6 +192,8 @@ func (s *Service) Stats() Stats {
 		PushDropped:  pushDropped,
 		DecodeErrors: decodeErr,
 		LastError:    lastError,
+		ByMode:       byMode,
+		ByRun:        byRun,
 	}
 }
 

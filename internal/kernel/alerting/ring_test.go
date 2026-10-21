@@ -41,7 +41,7 @@ func TestRingEvictsOldest(t *testing.T) {
 	if got := r.droppedCount(); got != 2 {
 		t.Fatalf("dropped = %d, want 2", got)
 	}
-	p := r.query(1, 50, 0)
+	p := r.query(1, 50, 0, Filter{})
 	if p.Total != 3 {
 		t.Fatalf("total = %d, want 3", p.Total)
 	}
@@ -55,7 +55,7 @@ func TestRingEvictsOldest(t *testing.T) {
 	if rec := r.add(mkAlert("r6")); rec.ID != 6 {
 		t.Fatalf("new ID = %d, want 6", rec.ID)
 	}
-	if p := r.query(1, 50, 0); p.Items[0].ID != 4 || p.Items[2].ID != 6 {
+	if p := r.query(1, 50, 0, Filter{}); p.Items[0].ID != 4 || p.Items[2].ID != 6 {
 		t.Fatalf("淘汰后 IDs = %v, want [4 5 6]", idsOf(p.Items))
 	}
 }
@@ -86,7 +86,7 @@ func TestRingPaginationBounds(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			p := r.query(c.page, c.size, 0)
+			p := r.query(c.page, c.size, 0, Filter{})
 			if p.Page != c.wantPage || p.PageSize != c.wantSize || p.Total != c.wantTotal {
 				t.Fatalf("Page=%d PageSize=%d Total=%d, want %d/%d/%d",
 					p.Page, p.PageSize, p.Total, c.wantPage, c.wantSize, c.wantTotal)
@@ -110,7 +110,7 @@ func TestRingExtremePageNoOverflow(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		r.add(mkAlert("x"))
 	}
-	p := r.query(int(^uint(0)>>1), 3, 0)
+	p := r.query(int(^uint(0)>>1), 3, 0, Filter{})
 	if p.Total != 10 {
 		t.Fatalf("total = %d, want 10", p.Total)
 	}
@@ -126,12 +126,12 @@ func TestRingSinceID(t *testing.T) {
 		r.add(mkAlert(fmt.Sprintf("r%d", i)))
 	}
 
-	p := r.query(1, 50, 3)
+	p := r.query(1, 50, 3, Filter{})
 	if p.Total != 2 || len(p.Items) != 2 || p.Items[0].ID != 4 || p.Items[1].ID != 5 {
 		t.Fatalf("since_id=3 total=%d items=%v, want 2 / [4 5]", p.Total, idsOf(p.Items))
 	}
 
-	p = r.query(1, 50, 99)
+	p = r.query(1, 50, 99, Filter{})
 	if p.Total != 0 || len(p.Items) != 0 {
 		t.Fatalf("since_id=99 total=%d items=%v, want 0/空", p.Total, idsOf(p.Items))
 	}
@@ -142,7 +142,7 @@ func TestRingSinceID(t *testing.T) {
 
 // TestRingEmptyItemsIsNonNil 空缓冲查询也必须是 [] 而不是 null。
 func TestRingEmptyItemsIsNonNil(t *testing.T) {
-	p := newRing(1).query(1, DefaultPageSize, 0)
+	p := newRing(1).query(1, DefaultPageSize, 0, Filter{})
 	if p.Items == nil {
 		t.Fatal("空缓冲的 Items 为 nil，必须是非 nil 空数组")
 	}
@@ -189,7 +189,7 @@ func TestRingConcurrentReadWrite(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				if r.query(1, 20, 0).Items == nil {
+				if r.query(1, 20, 0, Filter{}).Items == nil {
 					t.Error("并发读时 Items 为 nil")
 					return
 				}
@@ -204,12 +204,73 @@ func TestRingConcurrentReadWrite(t *testing.T) {
 	if got := r.len(); got != 50 {
 		t.Fatalf("len = %d, want 50（容量上限）", got)
 	}
-	p := r.query(1, MaxPageSize, 0)
+	p := r.query(1, MaxPageSize, 0, Filter{})
 	if p.Total != 50 {
 		t.Fatalf("total = %d, want 50", p.Total)
 	}
 	// 800 次写入后应保留 ID 751..800（连续、升序）。
 	if p.Items[0].ID != 751 || p.Items[49].ID != 800 {
 		t.Fatalf("IDs = [%d..%d], want [751..800]", p.Items[0].ID, p.Items[49].ID)
+	}
+}
+
+// TestRingQueryFilter 验证 mode/run_id 过滤：
+//   - Filter{} 空 ⇒ 返回全部；
+//   - 单条件 / 组合条件精确筛选；
+//   - total 必须是"过滤后"的条数（翻页以它为准），而不是过滤前。
+func TestRingQueryFilter(t *testing.T) {
+	r := newRing(100)
+	type meta struct{ mode, run string }
+	metas := []meta{
+		{ModeLive, "run-1"},
+		{ModeLive, "run-2"},
+		{ModeStatic, "run-1"},
+		{ModeStatic, "run-3"},
+		{"", ""}, // 旧载荷：无归属，任何带条件过滤都不应命中
+	}
+	for i, m := range metas {
+		a := mkAlert(fmt.Sprintf("r%d", i))
+		a.Mode = m.mode
+		a.RunID = m.run
+		r.add(a)
+	}
+
+	cases := []struct {
+		name string
+		f    Filter
+		want []uint64
+	}{
+		{"空 Filter 返回全部", Filter{}, []uint64{1, 2, 3, 4, 5}},
+		{"mode=live", Filter{Mode: ModeLive}, []uint64{1, 2}},
+		{"mode=static", Filter{Mode: ModeStatic}, []uint64{3, 4}},
+		{"run_id=run-1", Filter{RunID: "run-1"}, []uint64{1, 3}},
+		{"mode+run_id 组合", Filter{Mode: ModeStatic, RunID: "run-1"}, []uint64{3}},
+		{"未知 run_id", Filter{RunID: "run-9"}, []uint64{}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := r.query(1, MaxPageSize, 0, c.f)
+			if p.Total != len(c.want) {
+				t.Fatalf("total = %d, want %d（total 应是过滤后的条数）", p.Total, len(c.want))
+			}
+			got := idsOf(p.Items)
+			if len(got) != len(c.want) {
+				t.Fatalf("ids = %v, want %v", got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("ids = %v, want %v", got, c.want)
+				}
+			}
+		})
+	}
+
+	// 过滤后分页：total 反映过滤后的总数（2），但一页只返回 1 条。
+	p := r.query(1, 1, 0, Filter{Mode: ModeLive})
+	if p.Total != 2 {
+		t.Fatalf("过滤后分页 total = %d, want 2", p.Total)
+	}
+	if len(p.Items) != 1 || p.Items[0].ID != 1 {
+		t.Fatalf("过滤后分页 items = %v, want 仅首条 [1]", idsOf(p.Items))
 	}
 }

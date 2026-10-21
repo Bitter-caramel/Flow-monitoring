@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchAlerts, type AlertRecord } from './api'
+import { useWorkbench } from '../../shell/workbench'
 
 /** 前端列表最多保留的条数（防无限增长）。 */
 const MAX_ALERTS = 500
@@ -92,6 +93,11 @@ function formatEndpoint(ip: string, port: number): string {
  *   3. 断线指数退避重连，连上后先按 since_id=当前最大 id 补拉增量。
  */
 export function AlertListPanel() {
+  // 当前工作台决定查询归属与是否连 WS：静态工作台是一次性分析，不需要实时推送。
+  const wb = useWorkbench()
+  const mode = wb === 'static' ? 'static' : 'live'
+  const isLive = wb === 'live'
+
   const [alerts, setAlerts] = useState<AlertRecord[]>([])
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
@@ -119,7 +125,7 @@ export function AlertListPanel() {
     // 连上（含重连）后补拉 since_id 增量：填平"历史已拉、WS 尚未订阅"的缺口。
     const backfill = async () => {
       try {
-        const page = await fetchAlerts(1, BACKFILL_PAGE_SIZE, maxIDRef.current)
+        const page = await fetchAlerts(1, BACKFILL_PAGE_SIZE, maxIDRef.current, mode)
         if (!cancelled) applyIncoming(page.items)
       } catch {
         // 补拉失败不致命：下一次重连会再试。
@@ -138,7 +144,8 @@ export function AlertListPanel() {
     }
 
     const connect = () => {
-      if (cancelled) return
+      // 静态工作台不连 WS（一次性分析，没有实时推送）。
+      if (cancelled || !isLive) return
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
       const url = `${proto}://${window.location.host}/api/ws/alerts`
 
@@ -200,12 +207,13 @@ export function AlertListPanel() {
     // 首次加载：先拉历史，再连 WS（连上后还会按 since_id 补一次增量）。
     ;(async () => {
       try {
-        const page = await fetchAlerts(1, HISTORY_PAGE_SIZE, 0)
+        const page = await fetchAlerts(1, HISTORY_PAGE_SIZE, 0, mode)
         if (!cancelled) applyIncoming(page.items)
       } catch (e) {
         if (!cancelled) setError(String(e))
       } finally {
-        if (!cancelled) connect()
+        // 只有动态工作台才连 WS；静态工作台只做一次性拉取。
+        if (!cancelled && isLive) connect()
       }
     })()
 
@@ -225,7 +233,7 @@ export function AlertListPanel() {
         }
       }
     }
-  }, [applyIncoming])
+  }, [applyIncoming, mode, isLive])
 
   const total = alerts.length
 
@@ -233,9 +241,11 @@ export function AlertListPanel() {
     <div className="flex h-full min-h-0 flex-col gap-2">
       <div className="flex shrink-0 flex-wrap items-baseline gap-3">
         <h2 className="text-lg font-semibold">实时告警</h2>
-        <span className={connected ? 'text-ok' : 'text-warn'} title={connected ? 'WebSocket 已连接' : 'WebSocket 重连中'}>
-          {connected ? '● 已连接' : '○ 重连中'}
-        </span>
+        {isLive && (
+          <span className={connected ? 'text-ok' : 'text-warn'} title={connected ? 'WebSocket 已连接' : 'WebSocket 重连中'}>
+            {connected ? '● 已连接' : '○ 重连中'}
+          </span>
+        )}
         <span className="text-sm text-dim">共 {total} 条</span>
         <button
           className="rounded-sm border border-subtle px-2.5 py-1 text-sm text-fg hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-50"
@@ -265,7 +275,9 @@ export function AlertListPanel() {
             {alerts.length === 0 ? (
               <tr>
                 <td colSpan={7} className="text-dim">
-                  暂无告警
+                  {wb === 'static'
+                    ? '静态分析暂无告警（静态检测将在后续阶段接入）'
+                    : '暂无告警'}
                 </td>
               </tr>
             ) : (

@@ -274,3 +274,34 @@ func TestModuleHealthOnBadRulesDir(t *testing.T) {
 		t.Error("不健康状态应带原因")
 	}
 }
+
+// TestModulePublishesRunIDAndMode featureEvent 载荷必须带 run_id 与 mode=live，
+// 供宿主按分析任务归属过滤（阶段 2 的唯一产出 mode 是 live）。
+func TestModulePublishesRunIDAndMode(t *testing.T) {
+	host := newFakeHost(testSnapshot(t, "sqli.pcapng"))
+	m := &captureModule{}
+	if err := m.start(host, host.cfg); err != nil {
+		t.Fatalf("start 失败: %v", err)
+	}
+	defer m.stop()
+
+	host.waitDone(t)
+
+	pubs, logs := host.snapshot()
+	if len(pubs) == 0 {
+		t.Fatalf("没有任何 Publish（日志：%v）", logs)
+	}
+	for i, p := range pubs {
+		var obj map[string]any
+		if err := json.Unmarshal(p.data, &obj); err != nil {
+			t.Fatalf("Publish[%d] payload 不是合法 JSON: %v（payload=%s）", i, err, p.data)
+		}
+		if mode, _ := obj["mode"].(string); mode != modeLive {
+			t.Errorf("Publish[%d] mode = %q, want %q（payload=%s）", i, mode, modeLive, p.data)
+		}
+		runID, _ := obj["run_id"].(string)
+		if !strings.HasPrefix(runID, "run-") || len(runID) <= len("run-") {
+			t.Errorf("Publish[%d] run_id = %q, want 形如 run-<unixnano>（payload=%s）", i, runID, p.data)
+		}
+	}
+}

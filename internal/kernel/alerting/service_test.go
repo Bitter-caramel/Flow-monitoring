@@ -74,7 +74,7 @@ func TestServiceSubscribesAndQueries(t *testing.T) {
 		return st.Received == 3 && st.AlertsTotal == 3
 	})
 
-	p := svc.Query(1, DefaultPageSize, 0)
+	p := svc.Query(1, DefaultPageSize, 0, Filter{})
 	if p.Total != 3 || len(p.Items) != 3 {
 		t.Fatalf("total=%d items=%d, want 3/3", p.Total, len(p.Items))
 	}
@@ -127,7 +127,7 @@ func TestServiceDecodeErrorCounted(t *testing.T) {
 	if st.AlertsTotal != 1 {
 		t.Errorf("alerts_total = %d, want 1（非法 JSON 不应影响正常告警）", st.AlertsTotal)
 	}
-	if p := svc.Query(1, 10, 0); p.Total != 1 || p.Items[0].RuleID != "ok" {
+	if p := svc.Query(1, 10, 0, Filter{}); p.Total != 1 || p.Items[0].RuleID != "ok" {
 		t.Errorf("query = %+v, want 仅 ok 一条", p)
 	}
 }
@@ -147,7 +147,7 @@ func TestServiceHandlesRawMessagePayload(t *testing.T) {
 	}
 	waitFor(t, 2*time.Second, func() bool { return svc.Stats().AlertsTotal == 1 })
 
-	if p := svc.Query(1, 10, 0); p.Total != 1 || p.Items[0].RuleID != "raw" {
+	if p := svc.Query(1, 10, 0, Filter{}); p.Total != 1 || p.Items[0].RuleID != "raw" {
 		t.Fatalf("query = %+v, want raw 一条", p)
 	}
 }
@@ -199,4 +199,77 @@ func TestServiceStartNoop(t *testing.T) {
 		t.Errorf("enabled = true, want false（未订阅成功）")
 	}
 	svc.Stop()
+}
+
+// alertJSONMeta 造一条带 run_id/mode 归属的合法告警 JSON（字段与 featureEvent 对齐）。
+func alertJSONMeta(ruleID, mode, runID string) []byte {
+	return []byte(`{"rule_id":"` + ruleID + `","name":"` + ruleID + ` name",` +
+		`"severity":"high","weight":80,"time":"2024-01-02T03:04:05Z",` +
+		`"mode":"` + mode + `","run_id":"` + runID + `"}`)
+}
+
+// TestServiceQueryFilter 服务层 Query 的过滤：Filter{} 返回全部，mode/run_id 精确筛选。
+func TestServiceQueryFilter(t *testing.T) {
+	bus := eventbus.New()
+	defer bus.Close()
+
+	svc := New(Config{Capacity: 100})
+	svc.Start(bus, "detect.feature")
+	defer svc.Stop()
+
+	pubs := []struct{ mode, run string }{
+		{ModeLive, "run-1"},
+		{ModeLive, "run-1"},
+		{ModeStatic, "run-2"},
+	}
+	for i, p := range pubs {
+		if err := bus.Publish("detect.feature", alertJSONMeta(fmt.Sprintf("r%d", i), p.mode, p.run)); err != nil {
+			t.Fatalf("Publish #%d: %v", i, err)
+		}
+	}
+	waitFor(t, 2*time.Second, func() bool { return svc.Stats().AlertsTotal == len(pubs) })
+
+	if p := svc.Query(1, MaxPageSize, 0, Filter{}); p.Total != 3 {
+		t.Errorf("Filter{} total = %d, want 3（空过滤返回全部）", p.Total)
+	}
+	if p := svc.Query(1, MaxPageSize, 0, Filter{Mode: ModeStatic}); p.Total != 1 || p.Items[0].Mode != ModeStatic {
+		t.Errorf("mode=static => %+v, want 仅 1 条 static", p)
+	}
+	if p := svc.Query(1, MaxPageSize, 0, Filter{RunID: "run-1"}); p.Total != 2 {
+		t.Errorf("run_id=run-1 total = %d, want 2", p.Total)
+	}
+	if p := svc.Query(1, MaxPageSize, 0, Filter{Mode: ModeLive, RunID: "run-2"}); p.Total != 0 {
+		t.Errorf("mode=live&run_id=run-2 total = %d, want 0（组合条件无命中）", p.Total)
+	}
+}
+
+// TestServiceStatsByModeAndRun Stats().ByMode / ByRun 的计数与入库告警一致。
+func TestServiceStatsByModeAndRun(t *testing.T) {
+	bus := eventbus.New()
+	defer bus.Close()
+
+	svc := New(Config{Capacity: 100})
+	svc.Start(bus, "detect.feature")
+	defer svc.Stop()
+
+	pubs := []struct{ mode, run string }{
+		{ModeLive, "run-1"},
+		{ModeLive, "run-2"},
+		{ModeStatic, "run-3"},
+		{ModeLive, "run-1"},
+	}
+	for i, p := range pubs {
+		if err := bus.Publish("detect.feature", alertJSONMeta(fmt.Sprintf("r%d", i), p.mode, p.run)); err != nil {
+			t.Fatalf("Publish #%d: %v", i, err)
+		}
+	}
+	waitFor(t, 2*time.Second, func() bool { return svc.Stats().AlertsTotal == len(pubs) })
+
+	st := svc.Stats()
+	if st.ByMode[ModeLive] != 3 || st.ByMode[ModeStatic] != 1 {
+		t.Errorf("ByMode = %v, want live=3 static=1", st.ByMode)
+	}
+	if st.ByRun["run-1"] != 2 || st.ByRun["run-2"] != 1 || st.ByRun["run-3"] != 1 {
+		t.Errorf("ByRun = %v, want run-1=2 run-2=1 run-3=1", st.ByRun)
+	}
 }

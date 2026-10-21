@@ -51,17 +51,20 @@ function normalizeAlertPage(raw: Partial<AlertPage> | null | undefined): AlertPa
  * 拉取一页告警（GET /api/alerts）。
  *
  * sinceID > 0 时只取 id 更大的增量（WS 重连后的补拉用）。
+ * mode 非空时附加 `&mode=`，由后端按工作台（live/static）过滤。
  */
 export async function fetchAlerts(
   page = 1,
   pageSize = 50,
   sinceID = 0,
+  mode?: string,
 ): Promise<AlertPage> {
   const params = new URLSearchParams({
     page: String(page),
     page_size: String(pageSize),
   })
   if (sinceID > 0) params.set('since_id', String(sinceID))
+  if (mode) params.set('mode', mode)
 
   const resp = await fetch(`/api/alerts?${params.toString()}`, {
     headers: { Accept: 'application/json' },

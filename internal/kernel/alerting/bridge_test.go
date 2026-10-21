@@ -31,7 +31,7 @@ func TestServiceReceivesViaPluginBridge(t *testing.T) {
 	}
 	waitFor(t, 2*time.Second, func() bool { return svc.Stats().AlertsTotal == 1 })
 
-	p := svc.Query(1, 10, 0)
+	p := svc.Query(1, 10, 0, Filter{})
 	if p.Total != 1 || p.Items[0].RuleID != "bridge" {
 		t.Fatalf("query = %+v, want 单条 rule_id=bridge（跨进程桥接路径必须能解码）", p)
 	}

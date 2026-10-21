@@ -22,6 +22,9 @@ import (
 // capture 只负责产出检测特征，不依赖具体消费者，避免把告警模块拖进本进程。
 const topicDetectFeature = "detect.feature"
 
+// modeLive 是本阶段唯一实际产出的工作台归属（静态分析到阶段 3 接入）。
+const modeLive = "live"
+
 // detectSettings 是本模块从 ConfigSnapshot.Raw 里解析的私有配置段。
 // 字段 json tag 与 internal/kernel/config.DetectConfig 保持一致。
 type detectSettings struct {
@@ -34,23 +37,27 @@ type detectSettings struct {
 // 扁平化输出告警关键字段，便于下游（态势/攻击链）直接消费；
 // rule_id 是稳定契约字段。
 type featureEvent struct {
-	CaptureID string    `json:"capture_id,omitempty"`
-	RuleID    string    `json:"rule_id"`
-	Name      string    `json:"name,omitempty"`
-	Severity  string    `json:"severity,omitempty"`
-	Weight    int       `json:"weight,omitempty"`
-	Time      time.Time `json:"time"`
-	SrcIP     string    `json:"src_ip,omitempty"`
-	SrcPort   uint16    `json:"src_port,omitempty"`
-	DstIP     string    `json:"dst_ip,omitempty"`
-	DstPort   uint16    `json:"dst_port,omitempty"`
-	Proto     string    `json:"proto,omitempty"`
-	StreamID  int       `json:"stream_id"`
-	PktNo     int       `json:"pkt_no"`
-	FlowKey   string    `json:"flow_key,omitempty"`
-	Buffer    string    `json:"buffer,omitempty"`
-	Offset    int       `json:"offset"`
-	Snippet   string    `json:"snippet,omitempty"`
+	CaptureID string `json:"capture_id,omitempty"`
+	// 分析任务归属：run_id 标识一次分析任务，mode 标识工作台（阶段 2 恒为 live）。
+	// 两者用 omitempty，旧消费者不受影响。
+	RunID    string    `json:"run_id,omitempty"`
+	Mode     string    `json:"mode,omitempty"`
+	RuleID   string    `json:"rule_id"`
+	Name     string    `json:"name,omitempty"`
+	Severity string    `json:"severity,omitempty"`
+	Weight   int       `json:"weight,omitempty"`
+	Time     time.Time `json:"time"`
+	SrcIP    string    `json:"src_ip,omitempty"`
+	SrcPort  uint16    `json:"src_port,omitempty"`
+	DstIP    string    `json:"dst_ip,omitempty"`
+	DstPort  uint16    `json:"dst_port,omitempty"`
+	Proto    string    `json:"proto,omitempty"`
+	StreamID int       `json:"stream_id"`
+	PktNo    int       `json:"pkt_no"`
+	FlowKey  string    `json:"flow_key,omitempty"`
+	Buffer   string    `json:"buffer,omitempty"`
+	Offset   int       `json:"offset"`
+	Snippet  string    `json:"snippet,omitempty"`
 }
 
 // captureModule 是采集模块的运行期实现。
@@ -217,6 +224,8 @@ func (m *captureModule) run(ctx context.Context, src Source, hp *hotpath.Hotpath
 	alerts := 0
 	publishErrs := 0
 	captureID := src.Describe()
+	// run_id 在本次分析任务启动时生成一次，格式 run-<unixnano>；cross-process 唯一即可。
+	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
 
 	for {
 		frame, err := src.Next(ctx)
@@ -235,7 +244,7 @@ func (m *captureModule) run(ctx context.Context, src Source, hp *hotpath.Hotpath
 		hits := m.processFrame(hp, frame, packets)
 		for _, h := range hits {
 			alerts++
-			payload, err := json.Marshal(newFeatureEvent(captureID, h))
+			payload, err := json.Marshal(newFeatureEvent(captureID, runID, modeLive, h))
 			if err != nil {
 				publishErrs++
 				m.host.Log("error", fmt.Sprintf("capture: 序列化告警 %s 失败: %v", h.RuleID, err))
@@ -291,9 +300,11 @@ func (m *captureModule) setRunErr(msg string) {
 }
 
 // newFeatureEvent 把检测告警转成 detect.feature 的稳定 JSON 结构。
-func newFeatureEvent(captureID string, a detect.Alert) featureEvent {
+func newFeatureEvent(captureID, runID, mode string, a detect.Alert) featureEvent {
 	return featureEvent{
 		CaptureID: captureID,
+		RunID:     runID,
+		Mode:      mode,
 		RuleID:    a.RuleID,
 		Name:      a.Name,
 		Severity:  a.Severity,

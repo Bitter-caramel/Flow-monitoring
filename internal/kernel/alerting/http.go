@@ -2,8 +2,8 @@ package alerting
 
 // 两条查询路由：
 //
-//	GET /api/alerts?page=1&page_size=50&since_id=0
-//	GET /api/alerts/stats
+//      GET /api/alerts?page=1&page_size=50&since_id=0
+//      GET /api/alerts/stats
 //
 // 与 /api/modules 风格一致：内核直接挂在宿主 mux 上，不经过模块进程网关。
 
@@ -28,12 +28,16 @@ func (s *Service) Register(m Registrar) {
 }
 
 // handleAlerts GET /api/alerts
+//
+// 可选过滤参数：?mode=live|static&run_id=run-xxx
+// 缺省或非法值一律当空（不过滤），不报 400。
 func (s *Service) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page := intQuery(q.Get("page"), 1)
 	pageSize := intQuery(q.Get("page_size"), DefaultPageSize)
 	sinceID := uintQuery(q.Get("since_id"), 0)
-	writeJSON(w, http.StatusOK, s.Query(page, pageSize, sinceID))
+	f := Filter{Mode: modeQuery(q.Get("mode")), RunID: q.Get("run_id")}
+	writeJSON(w, http.StatusOK, s.Query(page, pageSize, sinceID, f))
 }
 
 // handleStats GET /api/alerts/stats
@@ -63,6 +67,16 @@ func uintQuery(v string, def uint64) uint64 {
 		return def
 	}
 	return n
+}
+
+// modeQuery 归一化 mode 查询参数：仅接受 live/static，其余（含空串）视为空即不过滤。
+func modeQuery(v string) string {
+	switch v {
+	case ModeLive, ModeStatic:
+		return v
+	default:
+		return ""
+	}
 }
 
 // writeJSON 统一 JSON 响应（与 transport.WriteJSON 行为一致，避免包间耦合）。

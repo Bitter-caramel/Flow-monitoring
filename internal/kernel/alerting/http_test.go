@@ -179,3 +179,45 @@ func mustMarshal(t *testing.T, v any) []byte {
 	}
 	return b
 }
+
+// TestAlertsHTTPModeFilter HTTP 层默认透传 mode/run_id 过滤：
+//   - /api/alerts?mode=static 只回 static；
+//   - /api/alerts?run_id=... 只回该 run；
+//   - 非法 mode 一律当空（不过滤），绝不 400。
+func TestAlertsHTTPModeFilter(t *testing.T) {
+	bus := eventbus.New()
+	defer bus.Close()
+
+	svc := New(Config{Capacity: 100})
+	svc.Start(bus, "detect.feature")
+	t.Cleanup(svc.Stop)
+
+	if err := bus.Publish("detect.feature", alertJSONMeta("live-run", ModeLive, "run-live")); err != nil {
+		t.Fatalf("Publish live: %v", err)
+	}
+	if err := bus.Publish("detect.feature", alertJSONMeta("static-run", ModeStatic, "run-static")); err != nil {
+		t.Fatalf("Publish static: %v", err)
+	}
+	waitFor(t, 2*time.Second, func() bool { return svc.Stats().AlertsTotal == 2 })
+
+	ts := newHTTPTestServer(t, svc)
+
+	var static Page
+	getJSON(t, ts.URL+"/api/alerts?mode=static", &static)
+	if static.Total != 1 || len(static.Items) != 1 || static.Items[0].Mode != ModeStatic {
+		t.Fatalf("mode=static => total=%d items=%+v, want 仅 1 条 static", static.Total, static.Items)
+	}
+
+	var byRun Page
+	getJSON(t, ts.URL+"/api/alerts?run_id=run-live", &byRun)
+	if byRun.Total != 1 || byRun.Items[0].RunID != "run-live" {
+		t.Fatalf("run_id=run-live => total=%d items=%+v, want 仅 run-live", byRun.Total, byRun.Items)
+	}
+
+	// 非法 mode 当空 ⇒ 不过滤，返回全部（且必须 200，不是 400）。
+	var all Page
+	getJSON(t, ts.URL+"/api/alerts?mode=bogus", &all)
+	if all.Total != 2 {
+		t.Fatalf("mode=bogus total = %d, want 2（非法值一律当空不过滤）", all.Total)
+	}
+}

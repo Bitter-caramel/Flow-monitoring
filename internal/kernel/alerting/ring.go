@@ -33,6 +33,21 @@ type Page struct {
 	Total    int     `json:"total"`
 }
 
+// 告警 mode 取值（前端工作台过滤用；阶段 2 里 live 是唯一实际产出的值）。
+const (
+	ModeLive   = "live"
+	ModeStatic = "static"
+)
+
+// Filter 是告警查询的过滤条件。
+//
+// ★ 空字段表示"不过滤"：Mode=="" 不按 mode 筛，RunID=="" 不按 run_id 筛，
+// 因此 Filter{} 等价于"返回全部"。
+type Filter struct {
+	Mode  string
+	RunID string
+}
+
 // ring 是并发安全的固定容量环形缓冲。
 type ring struct {
 	mu    sync.Mutex
@@ -76,15 +91,16 @@ func (r *ring) add(a Alert) Alert {
 	return rec
 }
 
-// query 按 id 升序返回一页告警。
+// query 按 id 升序返回一页告警（可选按 mode/run_id 过滤）。
 //
 // 语义：
 //   - page 从 1 起（<=0 按 1 处理）；
 //   - pageSize 默认 50、上限 500（<=0 用默认值）；
 //   - sinceID > 0 时只返回 id > sinceID 的记录（增量拉取）；
-//   - total 是经过 sinceID 过滤后的总数（翻页以它为准）；
+//   - f 的空字段不过滤（Filter{} 等价于返回全部）；
+//   - total 是经过 sinceID + Filter 过滤后的总数（翻页以它为准）；
 //   - 越界页返回空数组（不是 nil，也不是错误）。
-func (r *ring) query(page, pageSize int, sinceID uint64) Page {
+func (r *ring) query(page, pageSize int, sinceID uint64, f Filter) Page {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -100,9 +116,17 @@ func (r *ring) query(page, pageSize int, sinceID uint64) Page {
 
 	filtered := make([]Alert, 0, len(r.items))
 	for _, it := range r.items {
-		if it.ID > sinceID {
-			filtered = append(filtered, it)
+		if it.ID <= sinceID {
+			continue
 		}
+		// 空字段不过滤 ⇒ Filter{} 返回全部。
+		if f.Mode != "" && it.Mode != f.Mode {
+			continue
+		}
+		if f.RunID != "" && it.RunID != f.RunID {
+			continue
+		}
+		filtered = append(filtered, it)
 	}
 	total := len(filtered)
 
@@ -153,4 +177,25 @@ func (r *ring) droppedCount() uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.dropped
+}
+
+// groupCounts 遍历当前缓冲，返回按 mode / run_id 分组的条数。
+//
+// ★ 空值（""）不计数：旧载荷没有这些字段时不应虚增一个空 key。
+// 返回值始终非 nil（空缓冲返回空 map），便于 JSON 序列化成 {} 而不是 null。
+func (r *ring) groupCounts() (byMode, byRun map[string]int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	byMode = make(map[string]int)
+	byRun = make(map[string]int)
+	for _, it := range r.items {
+		if it.Mode != "" {
+			byMode[it.Mode]++
+		}
+		if it.RunID != "" {
+			byRun[it.RunID]++
+		}
+	}
+	return byMode, byRun
 }

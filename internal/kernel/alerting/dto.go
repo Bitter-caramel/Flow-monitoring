@@ -28,4 +28,11 @@ type Alert struct {
 	Buffer   string `json:"buffer"`
 	Offset   int    `json:"offset"`
 	Snippet  string `json:"snippet"`
+
+	// 分析任务归属：run_id 标识一次分析任务，mode 标识工作台（live/static）。
+	// 两者用 omitempty，兼容阶段 2 之前不含这些字段的旧载荷。
+	RunID string `json:"run_id,omitempty"`
+	Mode  string `json:"mode,omitempty"`
+	// CaptureID 是源文件/采集源标识（静态分析阶段才有值），同步透传便于复用。
+	CaptureID string `json:"capture_id,omitempty"`
 }
