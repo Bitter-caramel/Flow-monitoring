@@ -28,6 +28,9 @@ func Module() *plugin.Runtime {
 		},
 		MakeHandler: func(host plugin.Host) (http.Handler, error) {
 			svc := New(hoststore.New(host))
+			// ★ 原始抓包文件目录由宿主下发（ConfigSnapshot.DataDir）；
+			// 详情接口需要它来拼 filepath.Join(DataDir, rec.FilePath)。
+			svc.SetDataDir(host.Config().DataDir)
 			return svc.Handler(), nil
 		},
 	}

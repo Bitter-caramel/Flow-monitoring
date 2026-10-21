@@ -31,6 +31,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/captures", s.handleListCaptures)
 	mux.HandleFunc("GET /api/v1/captures/{id}", s.handleGetCapture)
 	mux.HandleFunc("GET /api/v1/captures/{id}/packets", s.handleListPackets)
+	mux.HandleFunc("GET /api/v1/captures/{id}/packets/{no}/detail", s.handlePacketDetail)
 
 	return mux
 }
@@ -107,6 +108,40 @@ func (s *Service) handleListPackets(w http.ResponseWriter, r *http.Request) {
 		Offset: page.Offset,
 		Limit:  page.Limit,
 	})
+}
+
+// handlePacketDetail GET /api/v1/captures/{id}/packets/{no}/detail
+//
+// 状态码约定：no 非法（非整数 / <1）⇒ 400；capture 或包不存在 ⇒ 404；
+// 文件超过 64 MB ⇒ 413；解析/读取失败 ⇒ 500（body 带原因）。
+func (s *Service) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	no, err := strconv.Atoi(r.PathValue("no"))
+	if err != nil || no < 1 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "包序号必须是从 1 开始的整数",
+		})
+		return
+	}
+
+	detail, err := s.PacketDetail(r.Context(), id, no)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidPacketNo):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		case errors.Is(err, ErrFileTooLarge):
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": err.Error()})
+		case errors.Is(err, storage.ErrNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		case errors.Is(err, plugin.ErrStorageUnavailable):
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "storage unavailable"})
+		default:
+			// ★ 不能只说"失败"：带上读取/解析失败的具体原因，便于排障。
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
 }
 
 // parsePage 从 query string 解析分页参数。
