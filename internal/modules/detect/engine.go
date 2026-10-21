@@ -146,7 +146,7 @@ func hitBuffer(p *Program, c *Ctx, buf rule.Buffer) []byte {
 
 // matchProgram 求值单条规则，返回是否命中以及命中所在的缓冲与偏移。
 //
-// 顺序严格照 docs/检测引擎.md §5：
+// 顺序严格照 docs/已完成/检测引擎.md §5：
 //  1. 规则级 flow 筛选；
 //  2. 源/目的端口分别筛选（★ 必须用 p.SrcPort / p.DstPort，不能用合并过的 AnyPort/Ports/Ranges）；
 //  3. 条件按序求值（offset/depth 相对「上次匹配结束位置」）。

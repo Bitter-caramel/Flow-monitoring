@@ -1,7 +1,7 @@
 // Package reassembly 包装 gopacket 的 TCP 重组（reassembly）包，
 // 负责「流字节存在哪儿、存多少、给谁看」。
 //
-// 设计依据：docs/TCP重组.md §2/§6/§7。
+// 设计依据：docs/已完成/TCP重组.md §2/§6/§7。
 // 本步（11-3）只新建模块与测试：不改检测引擎、不改默认粘性缓冲
 // （默认粘性缓冲见 11-2，热路径接入见 11-4）。
 package reassembly
@@ -24,7 +24,7 @@ type Options struct {
 	Skip bool
 }
 
-// DefaultOptions 返回默认配置（与 docs/TCP重组.md §6 的资源红线一致）。
+// DefaultOptions 返回默认配置（与 docs/已完成/TCP重组.md §6 的资源红线一致）。
 func DefaultOptions() Options {
 	return Options{
 		MemCap:         64 << 20,         // 64 MB

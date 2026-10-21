@@ -15,13 +15,13 @@ import (
 // 表示「缓冲区不存在」，不是「空缓冲区」。绝不 panic。
 //
 // ★ 返回的是内部缓冲的切片快照，调用方只读、不得改写。
-// 不复制：与 docs/TCP重组.md §5 一致，视图生命周期由 Reassembler 负责；
+// 不复制：与 docs/已完成/TCP重组.md §5 一致，视图生命周期由 Reassembler 负责；
 // 检测在上层「Feed 之后、下次 Feed 之前」同步消费，不存在并发改写窗口。
 type StreamView interface {
 	BytesToServer() []byte
 	BytesToClient() []byte
 	// Midstream 报告「重组视图不可信」：这条流出现过落在重组基准之前的段
-	// （中途抓包 + 乱序 ⇒ 这些段会永远搁浅，见 docs/TCP重组.md §7.3）。
+	// （中途抓包 + 乱序 ⇒ 这些段会永远搁浅，见 docs/已完成/TCP重组.md §7.3）。
 	// 没有流（空视图）时返回 false。
 	Midstream() bool
 }
@@ -89,7 +89,7 @@ type stream struct {
 	// ── C′（窄口径防漏）的簿记 ──
 	// baseline[d]：方向 d「首个观察段的基准候选」，等于 gopacket 给该 half 设的
 	// nextSeq（首段带 SYN 时 = SYN.seq+1，对齐 tcpassembly.go:694；否则 = 首段 seq，
-	// 因为我们无条件强制 start）。见 docs/TCP重组.md §7.3。
+	// 因为我们无条件强制 start）。见 docs/已完成/TCP重组.md §7.3。
 	// seen[d]：该方向是否已见过首段（用来区分「首段建立基准」与「后续段是否落在基准之前」）。
 	// unreliable：粘性标记 —— 一旦本流出现过落在基准之前的段，永久为 true。
 	baseline   [2]uint32
@@ -134,7 +134,7 @@ func (s *stream) Accept(tcp *layers.TCP, ci gopacket.CaptureInfo, dir reassembly
 // ReassembledSG 收到一段已重组成序的数据：追加进对应方向缓冲，并如实记账。
 //
 // 洞的记法：用 gopacket 在 Info() 给出的 skip（本次跳过的缺失字节数）累加；
-// 拿不到就记 0 —— 不假装完整（docs/TCP重组.md §7）。
+// 拿不到就记 0 —— 不假装完整（docs/已完成/TCP重组.md §7）。
 func (s *stream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.AssemblerContext) {
 	dir, _, _, skip := sg.Info()
 	nd := s.g2n[dirIndex(dir)]
@@ -160,7 +160,7 @@ func (s *stream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Assemb
 //
 // ★ 返回值语义保持不变（true = 移出 gopacket 池，这正是我们要的）。改动的是 D：
 // 先清理**我们自己的** byKey/byID 与缓冲，避免双向 FIN 之后仍持有已关闭的陈旧 stream
-// （陈旧引用 + 缓冲滞留，见 docs/TCP重组.md §7.3）。
+// （陈旧引用 + 缓冲滞留，见 docs/已完成/TCP重组.md §7.3）。
 //
 // ★ 安全性：本方法是在 gopacket 的装配过程中被调用的；我们只动自己的表与缓冲。
 // Feed 在 AssembleWithContext **之后**才查 r.byKey[key] ⇒ 本次包查不到就自然 return；

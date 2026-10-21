@@ -330,7 +330,7 @@ func (r *Reassembler) enforceMemCap() {
 //   - evict（MemCap 淘汰）—— 额外记一次 evictions；
 //   - stream.ReassemblyComplete（gopacket 判定连接结束、FIN/RST/超时）—— 见 D：
 //     以前我们只返回 true 让 gopacket 把连接移出池，**自己的 byKey/byID 却继续持有
-//     已关闭的旧 stream**（陈旧引用 + 缓冲滞留，docs/TCP重组.md §7.3）。
+//     已关闭的旧 stream**（陈旧引用 + 缓冲滞留，docs/已完成/TCP重组.md §7.3）。
 //
 // 只动我们自己的表与缓冲；gopacket 侧的移出由 ReassemblyComplete 的返回值负责。
 func (r *Reassembler) dropStream(s *stream) {

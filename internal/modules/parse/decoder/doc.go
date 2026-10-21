@@ -1,6 +1,6 @@
 // Package decoder 是协议解码层（L2/L3/L4 + 常见 L7）。
 //
-// 实现方式（见 docs/定制化与检测规划.md §2「自研 vs 复用红线」）：
+// 实现方式（见 docs/未完成/定制化与检测规划.md §2「自研 vs 复用红线」）：
 //   - L2/L3/L4 解码**复用 gopacket**（github.com/gopacket/gopacket，
 //     社区维护的 fork；原 google/gopacket 已停更）。
 //     解码是"苦力活"，且不同解码器的解码结果不一致会污染下游的

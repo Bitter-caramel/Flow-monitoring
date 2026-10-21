@@ -67,7 +67,7 @@ var pool = sync.Pool{New: func() any {
 // linkType 来自该包所属接口（pcapng IDB 的 LinkType）。
 // 解码异常不中断调用方：内部 panic 被 recover，包标记 Malformed。
 //
-// 解码本身由 gopacket 承担（见 docs/定制化与检测规划.md §2）：
+// 解码本身由 gopacket 承担（见 docs/未完成/定制化与检测规划.md §2）：
 // 协议解码是"苦力活"，复用社区实现可保证解码结果与社区标准一致，
 // 不污染下游的流聚合与检测。
 func Decode(p *datamodel.Packet, linkType int) {

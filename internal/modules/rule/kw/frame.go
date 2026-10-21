@@ -34,7 +34,7 @@ func NewState(raw *suricata.RawRule) *State {
 	}
 }
 
-// defaultStickyBuf 返回规则的默认粘性缓冲（docs/TCP重组.md §4）：
+// defaultStickyBuf 返回规则的默认粘性缓冲（docs/已完成/TCP重组.md §4）：
 // alert tcp → stream（匹配该包所在方向的已重组字节）；
 // 其它协议（udp/icmp/http/dns/tls/any…）→ payload（单包载荷，语义不变）。
 func defaultStickyBuf(p rule.Protocol) rule.Buffer {

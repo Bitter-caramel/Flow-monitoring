@@ -66,7 +66,7 @@ func (h *Hotpath) Reassembles() bool {
 // Process 处理一个「已经解码」的包：归流 → 喂重组器 → 匹配，返回本包全部命中。
 //
 // ★ 顺序红线：必须先把包喂给重组器再做匹配，否则当包看不到自己那段流
-// （docs/TCP重组.md §5；这也是 11-4 在 main.go 里写死的那条）。
+// （docs/已完成/TCP重组.md §5；这也是 11-4 在 main.go 里写死的那条）。
 // h 为 nil / p 为 nil / eng 为 nil 时返回 nil，不 panic。
 func (h *Hotpath) Process(p *datamodel.Packet) []detect.Alert {
 	if h == nil || p == nil || h.eng == nil {
