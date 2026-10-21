@@ -209,17 +209,25 @@ func TestListRunsEmptyItemsIsArray(t *testing.T) {
 	}
 }
 
-// TestCreateRunRejectsWhenAtCapacity 达到 maxRuns 后新建返回 409。
+// TestCreateRunRejectsWhenAtCapacity 并发名额满（maxRuns 个 running）后新建返回 409。
+//
+// ★ 必须用阻塞数据源保证前几个 Run 仍在 running：
+// 通过 HTTP 建 Run 会读真文件、瞬间结束，而已结束的 Run **不占并发名额**
+// （那是另一个语义，见 TestFinishedRunsDoNotConsumeCapacity）。
+// 早期版本用 HTTP 建 Run 来测容量，结果依赖时序 —— 本机绿、容器里红（flaky）。
 func TestCreateRunRejectsWhenAtCapacity(t *testing.T) {
-	_, _, h := newStaticModule(t, 1)
+	m, _, h := newStaticModule(t, 1)
 
-	first := createStaticRun(t, h, "cap-sqli")
-	if first.Code != http.StatusCreated {
-		t.Fatalf("第一个 POST 返回 %d，期望 201（body=%s）", first.Code, first.Body.String())
+	// 直接建一个"永远在跑"的 Run，稳定占住唯一名额。
+	blocking := &blockingSource{unblock: make(chan struct{})}
+	if _, err := m.addRun("static", "test:blocking", "", blocking); err != nil {
+		t.Fatalf("建第一个 Run 失败: %v", err)
 	}
-	second := createStaticRun(t, h, "cap-sqli")
-	if second.Code != http.StatusConflict {
-		t.Fatalf("第二个 POST 返回 %d，期望 409（body=%s）", second.Code, second.Body.String())
+	defer close(blocking.unblock)
+
+	rec := createStaticRun(t, h, "cap-sqli")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("并发名额满时 POST 返回 %d，期望 409（body=%s）", rec.Code, rec.Body.String())
 	}
 }
 
