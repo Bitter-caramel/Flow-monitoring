@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchAlerts, type AlertRecord } from './api'
 import { useWorkbench } from '../../shell/workbench'
+import { useEvidenceId } from '../../shell/evidence'
 
 /** 前端列表最多保留的条数（防无限增长）。 */
 const MAX_ALERTS = 500
@@ -85,29 +86,26 @@ function formatEndpoint(ip: string, port: number): string {
 }
 
 /**
- * 包号（后端 alerting.Alert 的 pkt_no）。
- *
- * ★ 本任务的硬约束不允许改 alert-list/api.ts，故这里就地读取可选字段：
- *   旧载荷/实时事件可能没有 pkt_no（Go omitempty 会直接省略），统一显示 "—"。
- */
-function formatPktNo(a: AlertRecord): string {
-  const raw = (a as AlertRecord & { pkt_no?: unknown }).pkt_no
-  return typeof raw === 'number' && raw > 0 ? String(raw) : '—'
-}
-
-/**
  * 实时告警面板。
  *
  * 数据流：
  *   1. 首屏 GET /api/alerts 拉历史（归一化后新到在前）；
- *   2. 连 ws(s)://<host>/api/ws/alerts 收实时告警（插到顶部，最多 500 条）；
+ *   2. 动态工作台连 ws(s)://<host>/api/ws/alerts 收实时告警（插到顶部，最多 500 条）；
  *   3. 断线指数退避重连，连上后先按 since_id=当前最大 id 补拉增量。
+ *
+ * ★ 静态工作台（16-6）：一次分析一个证据包。拉告警带 `capture_id=<当前证据包>`，
+ *   未选证据包时不请求、不连 WS，直接显示"请先选择证据包"；
+ *   若收到 WS 推送，只接受 `capture_id` 与当前证据包一致的告警（避免切换文件串味）。
  */
 export function AlertListPanel() {
   // 当前工作台决定查询归属与是否连 WS：静态工作台是一次性分析，不需要实时推送。
   const wb = useWorkbench()
   const mode = wb === 'static' ? 'static' : 'live'
   const isLive = wb === 'live'
+  // 静态工作台：当前证据包（'' = 未选，不请求）。
+  const evidenceId = useEvidenceId()
+  const isStatic = wb === 'static'
+  const needsEvidence = isStatic && evidenceId === ''
 
   const [alerts, setAlerts] = useState<AlertRecord[]>([])
   const [connected, setConnected] = useState(false)
@@ -131,12 +129,27 @@ export function AlertListPanel() {
   }, [])
 
   useEffect(() => {
+    // ★ 静态工作台未选证据包：不请求、不连 WS，清空旧文件告警。
+    if (needsEvidence) {
+      setAlerts([])
+      setConnected(false)
+      setError('')
+      return
+    }
+
     let cancelled = false
+
+    // 切换证据包（或工作台）时清空旧列表与增量游标，避免旧文件告警串味。
+    maxIDRef.current = 0
+    setAlerts([])
+
+    // 静态工作台按当前证据包过滤；动态工作台不带 capture_id（行为不变）。
+    const captureId = isStatic ? evidenceId : undefined
 
     // 连上（含重连）后补拉 since_id 增量：填平"历史已拉、WS 尚未订阅"的缺口。
     const backfill = async () => {
       try {
-        const page = await fetchAlerts(1, BACKFILL_PAGE_SIZE, maxIDRef.current, mode)
+        const page = await fetchAlerts(1, BACKFILL_PAGE_SIZE, maxIDRef.current, mode, captureId)
         if (!cancelled) applyIncoming(page.items)
       } catch {
         // 补拉失败不致命：下一次重连会再试。
@@ -185,6 +198,8 @@ export function AlertListPanel() {
         try {
           const msg = JSON.parse(ev.data) as AlertMessage
           if (msg && msg.type === 'alert' && msg.data && typeof msg.data.id === 'number') {
+            // ★ 静态工作台只接收当前证据包的告警，否则切换文件后旧文件的告警会串进来。
+            if (isStatic && msg.data.capture_id !== evidenceId) return
             applyIncoming([msg.data])
           }
         } catch {
@@ -218,7 +233,7 @@ export function AlertListPanel() {
     // 首次加载：先拉历史，再连 WS（连上后还会按 since_id 补一次增量）。
     ;(async () => {
       try {
-        const page = await fetchAlerts(1, HISTORY_PAGE_SIZE, 0, mode)
+        const page = await fetchAlerts(1, HISTORY_PAGE_SIZE, 0, mode, captureId)
         if (!cancelled) applyIncoming(page.items)
       } catch (e) {
         if (!cancelled) setError(String(e))
@@ -244,7 +259,7 @@ export function AlertListPanel() {
         }
       }
     }
-  }, [applyIncoming, mode, isLive])
+  }, [applyIncoming, mode, isLive, isStatic, evidenceId, needsEvidence])
 
   const total = alerts.length
 
@@ -269,57 +284,61 @@ export function AlertListPanel() {
 
       {error && <div className="sev-danger shrink-0">{error}</div>}
 
-      <div className="flex-1 overflow-auto min-h-0 panel-surface">
-        <table>
-          <thead>
-            <tr>
-              <th>时间</th>
-              <th>包号</th>
-              <th>严重度</th>
-              <th>规则ID</th>
-              <th>规则名</th>
-              <th>源 → 目的</th>
-              <th>缓冲+偏移</th>
-              <th>片段</th>
-            </tr>
-          </thead>
-          <tbody>
-            {alerts.length === 0 ? (
+      {needsEvidence ? (
+        <div className="flex flex-1 items-center justify-center panel-surface text-dim">
+          请先选择证据包
+        </div>
+      ) : (
+        <div className="flex-1 overflow-auto min-h-0 panel-surface">
+          <table>
+            <thead>
               <tr>
-                <td colSpan={8} className="text-dim">
-                  暂无告警
-                </td>
+                <th>时间</th>
+                <th>严重度</th>
+                <th>规则ID</th>
+                <th>规则名</th>
+                <th>源 → 目的</th>
+                <th>缓冲+偏移</th>
+                <th>片段</th>
               </tr>
-            ) : (
-              alerts.map((a) => (
-                <tr key={a.id}>
-                  <td className="mono tabular-nums whitespace-nowrap" title={a.time}>
-                    {a.time ? `${fmtDay(a.time)} ${fmtClock(a.time)}` : '-'}
-                  </td>
-                  <td className="mono tabular-nums whitespace-nowrap">{formatPktNo(a)}</td>
-                  <td className={`whitespace-nowrap ${severityClass(a.severity)}`}>
-                    {a.severity || '-'}
-                  </td>
-                  <td className="mono whitespace-nowrap">{a.rule_id || '-'}</td>
-                  <td className="whitespace-normal">{a.name || '-'}</td>
-                  <td className="mono whitespace-nowrap">
-                    {formatEndpoint(a.src_ip, a.src_port)} → {formatEndpoint(a.dst_ip, a.dst_port)}
-                  </td>
-                  <td className="mono whitespace-nowrap">
-                    {a.buffer || '-'}
-                    {typeof a.offset === 'number' ? `+${a.offset}` : ''}
-                  </td>
-                  <td className="mono">
-                    <span className="block truncate" style={{ maxWidth: '30rem' }} title={a.snippet}>
-                      {a.snippet || '-'}
-                    </span>
+            </thead>
+            <tbody>
+              {alerts.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="text-dim">
+                    暂无告警
                   </td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+              ) : (
+                alerts.map((a) => (
+                  <tr key={a.id}>
+                    <td className="mono tabular-nums whitespace-nowrap" title={a.time}>
+                      {a.time ? `${fmtDay(a.time)} ${fmtClock(a.time)}` : '-'}
+                    </td>
+                    <td className={`whitespace-nowrap ${severityClass(a.severity)}`}>
+                      {a.severity || '-'}
+                    </td>
+                    <td className="mono whitespace-nowrap">{a.rule_id || '-'}</td>
+                    <td className="whitespace-normal">{a.name || '-'}</td>
+                    <td className="mono whitespace-nowrap">
+                      {formatEndpoint(a.src_ip, a.src_port)} → {formatEndpoint(a.dst_ip, a.dst_port)}
+                    </td>
+                    <td className="mono whitespace-nowrap">
+                      {a.buffer || '-'}
+                      {typeof a.offset === 'number' ? `+${a.offset}` : ''}
+                    </td>
+                    <td className="mono">
+                      <span className="block truncate" style={{ maxWidth: '30rem' }} title={a.snippet}>
+                        {a.snippet || '-'}
+                      </span>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }

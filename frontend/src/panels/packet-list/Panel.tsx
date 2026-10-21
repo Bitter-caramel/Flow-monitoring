@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { listCaptures, listPackets, type CaptureRecord, type PacketRecord } from '../../api'
+import { listPackets, type PacketRecord } from '../../api'
+import { useEvidenceCapture, useEvidenceId } from '../../shell/evidence'
 
 // 行内只显示 HH:MM:SS（本地时区，主信息），毫秒用淡色后缀单独渲染，
 // 避免每天/每条都重复年月日；完整 ISO 仍放在单元格 title 里（悬停可看）。
@@ -41,42 +42,51 @@ function fmtRange(first?: string, last?: string): string {
  * 包列表面板。
  *
  * 功能：
- *   1. 下拉选择 capture
+ *   1. 跟随工作台级「当前证据包」（不再自带 capture 选择器）
  *   2. 分页展示包列表（No/时间/源→目的/协议/长度/INFO）
  *
  * 实质功能：真实调 query-api 分页取包，不做假数据。
  * 布局：面板撑满工作区（h-full），仅表格区内部滚动，分页条 sticky 常驻底部。
+ * ★ 未选证据包 ⇒ 显示"请先选择证据包"，不请求包列表。
  */
 export function PacketListPanel() {
-  const [captures, setCaptures] = useState<CaptureRecord[]>([])
-  const [captureId, setCaptureId] = useState('')
+  // 当前证据包来自工作台上下文（App 的上下文栏负责切换）。
+  const captureId = useEvidenceId()
+  const currentCapture = useEvidenceCapture()
+
   const [packets, setPackets] = useState<PacketRecord[]>([])
   const [total, setTotal] = useState(0)
   const [offset, setOffset] = useState(0)
   const [pageSize, setPageSize] = useState(50)
   const [error, setError] = useState('')
 
-  // 加载 capture 列表
+  // 切换证据包时回到第一页（旧 offset 对新文件没有意义）。
   useEffect(() => {
-    listCaptures(0, 100)
-      .then((res) => {
-        setCaptures(res.items)
-        if (res.items.length > 0 && !captureId) {
-          setCaptureId(res.items[0].id)
-        }
-      })
-      .catch((e) => setError(String(e)))
+    setOffset(0)
   }, [captureId])
 
   // 加载包列表（页大小变化时 offset 已归零，见 pageSize 的 onChange）
   useEffect(() => {
-    if (!captureId) return
+    if (!captureId) {
+      setPackets([])
+      setTotal(0)
+      return
+    }
+    let cancelled = false
     listPackets(captureId, offset, pageSize)
       .then((res) => {
+        if (cancelled) return
         setPackets(res.items)
         setTotal(res.total)
+        setError('')
       })
-      .catch((e) => setError(String(e)))
+      .catch((e) => {
+        if (cancelled) return
+        setError(String(e))
+      })
+    return () => {
+      cancelled = true
+    }
   }, [captureId, offset, pageSize])
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
@@ -84,7 +94,6 @@ export function PacketListPanel() {
   const atLastPage = offset + pageSize >= total
 
   // 当前 capture 的时间范围（后端 first_seen/last_seen；缺失则整段不渲染）。
-  const currentCapture = captures.find((c) => c.id === captureId)
   const timeRange = currentCapture
     ? fmtRange(currentCapture.first_seen, currentCapture.last_seen)
     : ''
@@ -94,10 +103,27 @@ export function PacketListPanel() {
   const sameDay =
     firstPacketDay !== '' && packets.every((p) => fmtDay(p.time ?? '') === firstPacketDay)
 
+  // 没有证据包：静态面板统一空态（不请求、不显示误导性的 0 包）。
+  if (!captureId) {
+    return (
+      <div className="flex h-full min-h-0 flex-col gap-2">
+        <div className="flex shrink-0 items-baseline gap-2">
+          <h2 className="text-lg font-semibold">包列表</h2>
+        </div>
+        <div className="flex flex-1 items-center justify-center panel-surface text-dim">
+          请先选择证据包
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
       <div className="flex shrink-0 items-baseline gap-2">
         <h2 className="text-lg font-semibold">包列表</h2>
+        {currentCapture && (
+          <span className="text-sm text-dim">· {currentCapture.name}</span>
+        )}
         <span className="text-sm text-dim">
           共 {total} 包 · 第 {currentPage}/{totalPages} 页
         </span>
@@ -106,24 +132,6 @@ export function PacketListPanel() {
             · 时间范围 <span className="mono">{timeRange}</span>
           </span>
         )}
-      </div>
-
-      <div className="shrink-0">
-        <select
-          value={captureId}
-          onChange={(e) => {
-            setCaptureId(e.target.value)
-            setOffset(0)
-          }}
-          className="rounded-sm border border-subtle bg-app px-2.5 py-1.5 text-base text-fg"
-        >
-          {captures.length === 0 && <option value="">暂无 capture</option>}
-          {captures.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}（{c.packet_count} 包）
-            </option>
-          ))}
-        </select>
       </div>
 
       {error && <div className="sev-danger shrink-0">{error}</div>}

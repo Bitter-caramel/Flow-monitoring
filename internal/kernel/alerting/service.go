@@ -159,7 +159,7 @@ func (s *Service) Stop() {
 	}
 }
 
-// Query 按 id 升序返回一页告警（可选按 mode/run_id 过滤，见 ring.query）。
+// Query 按 id 升序返回一页告警（可选按 mode/run_id/capture_id 过滤，见 ring.query）。
 func (s *Service) Query(page, pageSize int, sinceID uint64, f Filter) Page {
 	if s == nil {
 		return Page{Items: []Alert{}, Page: 1, PageSize: DefaultPageSize}
@@ -217,12 +217,11 @@ func (s *Service) consume(ctx context.Context, sub *eventbus.Subscription) {
 //
 // 解析失败计数 + 打日志，绝不静默丢弃（技术债 #2 的同类问题）。
 func (s *Service) handle(ev eventbus.Event) {
-	s.mu.Lock()
-	s.received++
-	s.mu.Unlock()
-
 	raw, ok := payloadBytes(ev.Payload)
 	if !ok {
+		// ★ received 与 decodeErr 必须成对、在同一临界区内更新，
+		//   否则 Stats() 可能读到 "received=1 但 decodeErrors=0" 的撕裂快照
+		//   （曾导致 TestServiceDecodeErrorCounted 等测试偶发失败）。
 		s.recordDecodeError(fmt.Errorf("alerting: 事件载荷类型 %T 不是字节（期望 []byte / json.RawMessage）", ev.Payload))
 		return
 	}
@@ -232,6 +231,10 @@ func (s *Service) handle(ev eventbus.Event) {
 		s.recordDecodeError(fmt.Errorf("alerting: 解析 detect.feature 告警失败: %w", err))
 		return
 	}
+
+	s.mu.Lock()
+	s.received++
+	s.mu.Unlock()
 	rec := s.ring.add(a)
 	s.push(rec)
 }
@@ -297,6 +300,8 @@ func payloadBytes(p any) ([]byte, bool) {
 func (s *Service) recordDecodeError(err error) {
 	msg := err.Error()
 	s.mu.Lock()
+	// ★ 与 received 在同一临界区递增，保证 Stats() 的快照自洽。
+	s.received++
 	s.decodeErr++
 	s.lastError = msg
 	s.mu.Unlock()

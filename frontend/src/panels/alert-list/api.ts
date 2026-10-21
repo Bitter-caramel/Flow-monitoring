@@ -22,9 +22,16 @@ export interface AlertRecord {
   dst_port: number
   proto: string
   stream_id: number
+  /** 命中包号（capture 帧序号）；旧载荷可能缺省（16-6 起不再在告警列表展示）。 */
+  pkt_no?: number
   buffer: string
   offset: number
   snippet: string
+  /** 分析任务归属（静态告警用于按证据包隔离实时推送）。 */
+  run_id?: string
+  mode?: string
+  /** 源抓包文件 ID（静态工作台的证据包标识）。 */
+  capture_id?: string
 }
 
 export interface AlertPage {
@@ -52,12 +59,14 @@ function normalizeAlertPage(raw: Partial<AlertPage> | null | undefined): AlertPa
  *
  * sinceID > 0 时只取 id 更大的增量（WS 重连后的补拉用）。
  * mode 非空时附加 `&mode=`，由后端按工作台（live/static）过滤。
+ * captureId 非空时附加 `&capture_id=`，由后端按当前证据包过滤（静态工作台）。
  */
 export async function fetchAlerts(
   page = 1,
   pageSize = 50,
   sinceID = 0,
   mode?: string,
+  captureId?: string,
 ): Promise<AlertPage> {
   const params = new URLSearchParams({
     page: String(page),
@@ -65,6 +74,7 @@ export async function fetchAlerts(
   })
   if (sinceID > 0) params.set('since_id', String(sinceID))
   if (mode) params.set('mode', mode)
+  if (captureId) params.set('capture_id', captureId)
 
   const resp = await fetch(`/api/alerts?${params.toString()}`, {
     headers: { Accept: 'application/json' },

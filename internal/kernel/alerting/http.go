@@ -29,14 +29,18 @@ func (s *Service) Register(m Registrar) {
 
 // handleAlerts GET /api/alerts
 //
-// 可选过滤参数：?mode=live|static&run_id=run-xxx
+// 可选过滤参数：?mode=live|static&run_id=run-xxx&capture_id=cap-xxx
 // 缺省或非法值一律当空（不过滤），不报 400。
 func (s *Service) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page := intQuery(q.Get("page"), 1)
 	pageSize := intQuery(q.Get("page_size"), DefaultPageSize)
 	sinceID := uintQuery(q.Get("since_id"), 0)
-	f := Filter{Mode: modeQuery(q.Get("mode")), RunID: q.Get("run_id")}
+	f := Filter{
+		Mode:      modeQuery(q.Get("mode")),
+		RunID:     q.Get("run_id"),
+		CaptureID: q.Get("capture_id"),
+	}
 	writeJSON(w, http.StatusOK, s.Query(page, pageSize, sinceID, f))
 }
 

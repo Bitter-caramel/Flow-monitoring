@@ -221,3 +221,72 @@ func TestAlertsHTTPModeFilter(t *testing.T) {
 		t.Fatalf("mode=bogus total = %d, want 2（非法值一律当空不过滤）", all.Total)
 	}
 }
+
+// alertJSONCapture 造一条带 mode/run_id/capture_id 归属的合法告警 JSON。
+func alertJSONCapture(ruleID, mode, runID, captureID string) []byte {
+	return []byte(`{"rule_id":"` + ruleID + `","name":"` + ruleID + ` name",` +
+		`"severity":"high","weight":80,"time":"2024-01-02T03:04:05Z",` +
+		`"mode":"` + mode + `","run_id":"` + runID + `",` +
+		`"capture_id":"` + captureID + `"}`)
+}
+
+// TestAlertsHTTPCaptureIDFilter HTTP 层透传 capture_id：
+//   - /api/alerts?capture_id=cap-A 只回 A，且 total 是过滤后的条数；
+//   - 与 mode 组合仍精确；
+//   - 缺省/未知 capture_id 不报 400（未知当空 ⇒ 全部）。
+func TestAlertsHTTPCaptureIDFilter(t *testing.T) {
+	bus := eventbus.New()
+	defer bus.Close()
+
+	svc := New(Config{Capacity: 100})
+	svc.Start(bus, "detect.feature")
+	t.Cleanup(svc.Stop)
+
+	pubs := []struct{ rule, mode, run, capture string }{
+		{"a1", ModeStatic, "run-a", "cap-A"},
+		{"b1", ModeStatic, "run-b", "cap-B"},
+		{"a2", ModeStatic, "run-a", "cap-A"},
+	}
+	for _, p := range pubs {
+		if err := bus.Publish("detect.feature", alertJSONCapture(p.rule, p.mode, p.run, p.capture)); err != nil {
+			t.Fatalf("Publish %s: %v", p.rule, err)
+		}
+	}
+	waitFor(t, 2*time.Second, func() bool { return svc.Stats().AlertsTotal == len(pubs) })
+
+	ts := newHTTPTestServer(t, svc)
+
+	var byCapture Page
+	getJSON(t, ts.URL+"/api/alerts?capture_id=cap-A", &byCapture)
+	if byCapture.Total != 2 {
+		t.Fatalf("capture_id=cap-A total = %d, want 2（total 应是过滤后条数）", byCapture.Total)
+	}
+	if len(byCapture.Items) != 2 {
+		t.Fatalf("capture_id=cap-A items = %d, want 2", len(byCapture.Items))
+	}
+	for _, a := range byCapture.Items {
+		if a.CaptureID != "cap-A" {
+			t.Fatalf("capture_id=cap-A 返回了 %q 的告警", a.CaptureID)
+		}
+	}
+
+	var combined Page
+	getJSON(t, ts.URL+"/api/alerts?mode=static&capture_id=cap-A", &combined)
+	if combined.Total != 2 || len(combined.Items) != 2 {
+		t.Fatalf("mode=static&capture_id=cap-A => total=%d items=%d, want 2/2", combined.Total, len(combined.Items))
+	}
+
+	// 缺省 capture_id 不过滤 ⇒ 返回全部（200，不 400）。
+	var all Page
+	getJSON(t, ts.URL+"/api/alerts", &all)
+	if all.Total != 3 {
+		t.Fatalf("无 capture_id total = %d, want 3（不过滤）", all.Total)
+	}
+
+	// 未知 capture_id 属合法过滤值 ⇒ 空结果（200，不 400）。
+	var unknown Page
+	getJSON(t, ts.URL+"/api/alerts?capture_id=cap-X", &unknown)
+	if unknown.Total != 0 || len(unknown.Items) != 0 {
+		t.Fatalf("未知 capture_id => total=%d items=%d, want 0/0", unknown.Total, len(unknown.Items))
+	}
+}

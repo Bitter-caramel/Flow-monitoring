@@ -42,10 +42,11 @@ const (
 // Filter 是告警查询的过滤条件。
 //
 // ★ 空字段表示"不过滤"：Mode=="" 不按 mode 筛，RunID=="" 不按 run_id 筛，
-// 因此 Filter{} 等价于"返回全部"。
+// CaptureID=="" 不按 capture_id 筛，因此 Filter{} 等价于"返回全部"。
 type Filter struct {
-	Mode  string
-	RunID string
+	Mode      string
+	RunID     string
+	CaptureID string
 }
 
 // ring 是并发安全的固定容量环形缓冲。
@@ -91,7 +92,7 @@ func (r *ring) add(a Alert) Alert {
 	return rec
 }
 
-// query 按 id 升序返回一页告警（可选按 mode/run_id 过滤）。
+// query 按 id 升序返回一页告警（可选按 mode/run_id/capture_id 过滤）。
 //
 // 语义：
 //   - page 从 1 起（<=0 按 1 处理）；
@@ -124,6 +125,9 @@ func (r *ring) query(page, pageSize int, sinceID uint64, f Filter) Page {
 			continue
 		}
 		if f.RunID != "" && it.RunID != f.RunID {
+			continue
+		}
+		if f.CaptureID != "" && it.CaptureID != f.CaptureID {
 			continue
 		}
 		filtered = append(filtered, it)

@@ -7,6 +7,7 @@ import {
   type CaptureRecord,
   type RunRecord,
 } from '../../api'
+import { useEvidenceId, useEvidenceSelect } from '../../shell/evidence'
 
 /** 轮询间隔：仅当存在 running 任务时生效。 */
 const POLL_INTERVAL_MS = 2000
@@ -61,9 +62,15 @@ function isNewerRun(a: RunRecord, b: RunRecord): boolean {
  * capture_id 的），按 capture_id 分组、每组取 started 最新的一条作为该文件"最近一次分析"。
  *
  * ★ 同一文件分析多次也只显示一行；旧数据（capture_id 为空）直接跳过。
+ * ★ 点击某一行（非按钮区域）把该文件设为工作台级「当前证据包」，告警/包列表随之刷新；
+ *   行内「分析/重新分析」按钮只发起该文件的 Run，行为不变。
  * ★ 运行中每 2 秒轮询；全部结束或组件卸载时清理定时器。
  */
 export function AnalysisRunsPanel() {
+  // 工作台级当前证据包：点击行切换；被选中的行有左侧竖条标记。
+  const evidenceId = useEvidenceId()
+  const selectEvidence = useEvidenceSelect()
+
   const [captures, setCaptures] = useState<CaptureRecord[]>([])
   const [runs, setRuns] = useState<RunRecord[]>([])
   const [capturesError, setCapturesError] = useState('')
@@ -190,9 +197,23 @@ export function AnalysisRunsPanel() {
                   const status = statusOf(run)
                   const busy = creatingId === c.id
                   const rowError = rowErrors[c.id]
+                  const selected = c.id === evidenceId
                   return (
-                    <tr key={c.id}>
-                      <td className="whitespace-normal">{c.name}</td>
+                    <tr
+                      key={c.id}
+                      className={`cursor-pointer${selected ? ' bg-elevated' : ''}`}
+                      title="点击设为当前证据包"
+                      onClick={(e) => {
+                        // 按钮区域只发起分析，不顺带切换证据包。
+                        if ((e.target as HTMLElement).closest('button')) return
+                        selectEvidence(c.id)
+                      }}
+                    >
+                      <td
+                        className={`whitespace-normal${selected ? ' border-l-2 border-accent' : ''}`}
+                      >
+                        {c.name}
+                      </td>
                       <td className="tabular-nums">{c.packet_count}</td>
                       <td className="tabular-nums">{formatBytes(c.byte_size)}</td>
                       <td className={`whitespace-nowrap ${status.className}`} title={run?.err || status.label}>

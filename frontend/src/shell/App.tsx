@@ -28,10 +28,16 @@ import { useAppStatus } from './useAppStatus'
 import { useActivePanel } from './useActivePanel'
 import { PanelErrorBoundary } from './ErrorBoundary'
 import { WorkbenchProvider } from './workbench'
+import { EvidenceBar, EvidenceProvider, useEvidence } from './evidence'
 
 export function App() {
   // ★ 当前工作台/面板来自 URL（hash 路由，URL 是唯一数据源）：刷新保持、可分享、可前进后退。
   const { workbench, activeId, selectPanel, selectWorkbench } = useActivePanel()
+
+  // ★ 工作台级「当前证据包」：仅静态工作台启用（读/写 location.search 的 capture）。
+  //   URL 是唯一数据源；切换只 replaceState，不刷新、不新增历史、不动 hash。
+  const evidenceEnabled = workbench === 'static'
+  const evidence = useEvidence(evidenceEnabled)
 
   // 全局状态只请求一次，顶栏与状态栏共用（避免重复打后端）。
   const status = useAppStatus()
@@ -66,28 +72,39 @@ export function App() {
         <div className="flex min-h-0 flex-1">
           <SideNav workbench={workbench} activeId={activeId} onSelect={selectPanel} />
 
-          <main className="min-w-0 flex-1 overflow-auto p-4">
-            {ActiveComponent ? (
-              activeAvailable ? (
-                // ★ 面板级错误边界：任何一个面板渲染崩溃都只影响它自己，不许把整个控制台打白。
-                //   key=activeId ⇒ 切面板时边界重建、错误状态自动复位。
-                <PanelErrorBoundary key={activeId} label={active?.manifest.name}>
-                  <ActiveComponent />
-                </PanelErrorBoundary>
-              ) : (
-                // 模块停用 ⇒ 入口置灰且当前工作区给占位提示（不空白、不报错、不改选）。
-                <div className="flex h-full items-center justify-center px-4 text-center text-dim">
-                  <span>
-                    该面板所属模块{' '}
-                    <span className="mono">{active?.manifest.moduleId}</span>{' '}
-                    未启用 —— 去「控制台」里启用它
-                  </span>
-                </div>
-              )
-            ) : (
-              <div className="flex h-full items-center justify-center text-dim">请注册至少一个面板</div>
-            )}
-          </main>
+          <EvidenceProvider
+            value={evidence.id}
+            capture={evidence.capture}
+            onSelect={evidence.select}
+          >
+            <div className="flex min-w-0 flex-1 flex-col">
+              {/* ★ 证据包上下文栏只在静态工作台出现；动态/控制台不受影响。 */}
+              {evidenceEnabled && <EvidenceBar state={evidence} />}
+
+              <main className="min-w-0 flex-1 overflow-auto p-4">
+                {ActiveComponent ? (
+                  activeAvailable ? (
+                    // ★ 面板级错误边界：任何一个面板渲染崩溃都只影响它自己，不许把整个控制台打白。
+                    //   key=activeId ⇒ 切面板时边界重建、错误状态自动复位。
+                    <PanelErrorBoundary key={activeId} label={active?.manifest.name}>
+                      <ActiveComponent />
+                    </PanelErrorBoundary>
+                  ) : (
+                    // 模块停用 ⇒ 入口置灰且当前工作区给占位提示（不空白、不报错、不改选）。
+                    <div className="flex h-full items-center justify-center px-4 text-center text-dim">
+                      <span>
+                        该面板所属模块{' '}
+                        <span className="mono">{active?.manifest.moduleId}</span>{' '}
+                        未启用 —— 去「控制台」里启用它
+                      </span>
+                    </div>
+                  )
+                ) : (
+                  <div className="flex h-full items-center justify-center text-dim">请注册至少一个面板</div>
+                )}
+              </main>
+            </div>
+          </EvidenceProvider>
         </div>
       </WorkbenchProvider>
 
