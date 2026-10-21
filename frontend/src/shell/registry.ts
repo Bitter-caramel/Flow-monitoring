@@ -8,7 +8,7 @@
  *   register（挂载声明）→ shell 装配（拓扑排序）→ 渲染选中面板 → 卸载由 React 管理
  */
 import type { ComponentType } from 'react'
-import type { PanelLayer, PanelManifest } from './manifest'
+import type { PanelLayer, PanelManifest, Workbench } from './manifest'
 
 /** 面板插件 = manifest + React 组件实现。 */
 export interface PanelPlugin {
@@ -85,7 +85,15 @@ class PanelRegistry {
     )
   }
 
-  /** 按层级分组（导航渲染用）。 */
+  /**
+   * 按工作台列出面板（导航渲染用）。
+   * ★ 保持注册顺序（Map 的插入顺序），不按 id 重排。
+   */
+  listByWorkbench(wb: Workbench): PanelPlugin[] {
+    return [...this.panels.values()].filter((p) => p.manifest.workbenches.includes(wb))
+  }
+
+  /** 按层级分组（保留供诊断/未来使用；导航已改用 listByWorkbench）。 */
   listByLayer(): Map<PanelLayer, PanelPlugin[]> {
     const groups = new Map<PanelLayer, PanelPlugin[]>()
     for (const p of this.list()) {

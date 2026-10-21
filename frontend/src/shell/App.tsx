@@ -2,17 +2,17 @@
  * Shell 外壳 —— 设计文档 §4 的四区骨架。
  *
  *   ┌───────────────────────────────────────────────┐
- *   │ 顶栏 TopBar                                     │  ← 产品名 / 搜索 / 主题 / 密度 / 连接
+ *   │ 顶栏 TopBar                                     │  ← 产品名 / 工作台 tab / 搜索 / 主题 / 密度 / 连接
  *   ├──────────┬────────────────────────────────────┤
  *   │ 左导航    │ 工作区（面板挂载点，独立滚动）        │
- *   │ LayerNav  │                                     │
- *   │ (按层分组) │                                     │
+ *   │ SideNav   │                                     │
+ *   │ (按工作台) │                                     │
  *   ├──────────┴────────────────────────────────────┤
  *   │ 状态栏 StatusBar                                │  ← 模块数/启用数 · 自检 · 刷新
  *   └───────────────────────────────────────────────┘
  *
  * 只做三件事：
- *   1. 读注册表，交给 LayerNav 渲染分层导航；
+ *   1. 读注册表，交给 SideNav 渲染当前工作台的面板导航；
  *   2. 在工作区挂载选中的面板组件（shell 不感知其实现）；
  *   3. 持有一个 useAppStatus，把连接状态分发给 TopBar / StatusBar（单一数据源）。
  *
@@ -21,7 +21,7 @@
 import { useEffect, useState } from 'react'
 import { isAvailable, panelRegistry, setEnabledModules } from './registry'
 import type { PanelPlugin } from './registry'
-import { LayerNav } from './LayerNav'
+import { SideNav } from './SideNav'
 import { TopBar } from './TopBar'
 import { StatusBar } from './StatusBar'
 import { useAppStatus } from './useAppStatus'
@@ -29,8 +29,8 @@ import { useActivePanel } from './useActivePanel'
 import { PanelErrorBoundary } from './ErrorBoundary'
 
 export function App() {
-  // ★ 当前面板来自 URL（hash 路由，URL 是唯一数据源）：刷新保持、可分享、可前进后退。
-  const { activeId, select } = useActivePanel()
+  // ★ 当前工作台/面板来自 URL（hash 路由，URL 是唯一数据源）：刷新保持、可分享、可前进后退。
+  const { workbench, activeId, selectPanel, selectWorkbench } = useActivePanel()
 
   // 全局状态只请求一次，顶栏与状态栏共用（避免重复打后端）。
   const status = useAppStatus()
@@ -55,10 +55,14 @@ export function App() {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-app text-fg">
-      <TopBar connection={status.state} />
+      <TopBar
+        connection={status.state}
+        workbench={workbench}
+        onSelectWorkbench={selectWorkbench}
+      />
 
       <div className="flex min-h-0 flex-1">
-        <LayerNav activeId={activeId} onSelect={select} />
+        <SideNav workbench={workbench} activeId={activeId} onSelect={selectPanel} />
 
         <main className="min-w-0 flex-1 overflow-auto p-4">
           {ActiveComponent ? (
@@ -74,7 +78,7 @@ export function App() {
                 <span>
                   该面板所属模块{' '}
                   <span className="mono">{active?.manifest.moduleId}</span>{' '}
-                  未启用 —— 去「模块拓扑」里启用它
+                  未启用 —— 去「控制台」里启用它
                 </span>
               </div>
             )

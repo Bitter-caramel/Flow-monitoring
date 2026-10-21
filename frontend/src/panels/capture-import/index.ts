@@ -14,6 +14,8 @@ registerPanel(
     version: '1.0.0',
     description: '上传 pcap/pcapng 文件并查看 capture 列表',
     layer: 'L1',
+    workbenches: ['static'],
+    group: '分析',
     icon: '⇪',
     moduleId: 'modules.importer',
   },

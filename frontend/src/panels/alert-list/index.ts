@@ -14,6 +14,8 @@ registerPanel(
     version: '1.0.0',
     description: '订阅宿主告警 WebSocket，实时滚动显示（历史 + 增量）',
     layer: 'L1',
+    workbenches: ['live'],
+    group: '结果',
     icon: '⚠',
   },
   AlertListPanel,

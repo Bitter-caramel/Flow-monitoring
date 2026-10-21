@@ -13,6 +13,8 @@ registerPanel(
     version: '0.1.0',
     description: '模块依赖分层拓扑图（自研 SVG）',
     layer: 'L2',
+    workbenches: ['console'],
+    group: '模块',
     icon: '◈',
   },
   ModuleGraphPanel,

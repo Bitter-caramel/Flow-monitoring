@@ -23,11 +23,16 @@ import {
   type Density,
   type Theme,
 } from './theme'
+import { WORKBENCHES, WORKBENCH_LABELS, type Workbench } from './manifest'
 import type { ConnectionState } from './useAppStatus'
 
 interface TopBarProps {
   /** 后端连接状态（由 App 的 useAppStatus 传入）。 */
   connection: ConnectionState
+  /** 当前工作台（由 App 的 useActivePanel 传入）。 */
+  workbench: Workbench
+  /** 切换工作台（跳到该工作台的默认面板）。 */
+  onSelectWorkbench: (wb: Workbench) => void
 }
 
 /** 连接指示的文案与配色（都用语义令牌）。 */
@@ -42,7 +47,7 @@ function connectionView(connection: ConnectionState): { dot: string; text: strin
   }
 }
 
-export function TopBar({ connection }: TopBarProps) {
+export function TopBar({ connection, workbench, onSelectWorkbench }: TopBarProps) {
   const [theme, setThemeState] = useState<Theme>(() => readStoredTheme())
   const [density, setDensityState] = useState<Density>(() => readStoredDensity())
 
@@ -62,6 +67,28 @@ export function TopBar({ connection }: TopBarProps) {
   return (
     <header className="flex h-11 shrink-0 items-center gap-3 border-b border-subtle bg-panel px-3">
       <span className="text-md font-semibold text-fg">流量分析平台</span>
+
+      {/* 工作台 tab：静态分析 / 动态分析 / 控制台（当前工作台高亮） */}
+      <nav aria-label="工作台" className="flex items-center gap-1">
+        {WORKBENCHES.map((wb) => {
+          const active = wb === workbench
+          return (
+            <button
+              key={wb}
+              type="button"
+              onClick={() => onSelectWorkbench(wb)}
+              aria-current={active ? 'page' : undefined}
+              className={`rounded-sm px-2 py-1 text-sm ${
+                active
+                  ? 'bg-accent text-accent-fg'
+                  : 'text-muted hover:bg-elevated hover:text-fg'
+              }`}
+            >
+              {WORKBENCH_LABELS[wb]}
+            </button>
+          )
+        })}
+      </nav>
 
       {/* 全局搜索：本轮仅占位，命令面板 P3 实现 */}
       <input

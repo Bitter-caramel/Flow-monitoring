@@ -14,6 +14,8 @@ registerPanel(
     version: '1.0.0',
     description: '按 capture 分页查看数据包（Wireshark 风格）',
     layer: 'L1',
+    workbenches: ['static', 'live'],
+    group: '数据',
     icon: '▤',
     moduleId: 'modules.query',
   },
