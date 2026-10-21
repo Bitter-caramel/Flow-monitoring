@@ -143,6 +143,30 @@ export async function listPackets(
 }
 
 /**
+ * 取某 capture 的第 no 个包（1 起）。
+ *
+ * ★ 后端分页参数是 offset/limit（不是 page/page_size）：第 no 个包
+ *   ⇒ `?offset=no-1&limit=1`。
+ * ★ 后端查不到时返回空列表 ⇒ 这里返回 null，由界面显示「该包不存在」。
+ * ★ signal 让抽屉关闭/切换包时中止在途请求，避免迟到的旧响应覆盖新状态。
+ */
+export async function fetchPacket(
+  captureId: string,
+  no: number,
+  signal?: AbortSignal,
+): Promise<PacketRecord | null> {
+  const safeNo = Number.isFinite(no) ? Math.floor(no) : 0
+  const offset = safeNo > 0 ? safeNo - 1 : 0
+  const resp = await fetch(
+    `/api/v1/captures/${encodeURIComponent(captureId)}/packets?offset=${offset}&limit=1`,
+    { headers: requestHeaders('GET'), signal },
+  )
+  await throwIfNotOK(resp)
+  const page = normalizePage<PacketRecord>(await resp.json())
+  return page.items[0] ?? null
+}
+
+/**
  * 模块控制面视图（GET /api/modules 数组元素）。
  * 字段对齐后端 internal/kernel/modulecontrol.ModuleView 的 JSON tag，
  * 前端只声明自己会用的字段（多出来的字段忽略即可）。

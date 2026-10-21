@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchAlerts, type AlertRecord } from './api'
 import { useWorkbench } from '../../shell/workbench'
 import { useEvidenceId } from '../../shell/evidence'
+import { PacketDetail, type PacketRef } from '../../shell/PacketDetail'
 
 /** 前端列表最多保留的条数（防无限增长）。 */
 const MAX_ALERTS = 500
@@ -110,6 +111,13 @@ export function AlertListPanel() {
   const [alerts, setAlerts] = useState<AlertRecord[]>([])
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
+  // 当前点开的告警包（同一个共享抽屉）；null = 关闭。
+  const [selected, setSelected] = useState<PacketRef | null>(null)
+
+  // 切换工作台/证据包时关闭抽屉，避免继续展示上一份数据的包。
+  useEffect(() => {
+    setSelected(null)
+  }, [wb, evidenceId])
 
   const maxIDRef = useRef(0)
   const wsRef = useRef<WebSocket | null>(null)
@@ -300,44 +308,80 @@ export function AlertListPanel() {
                 <th>源 → 目的</th>
                 <th>缓冲+偏移</th>
                 <th>片段</th>
+                <th>包</th>
               </tr>
             </thead>
             <tbody>
               {alerts.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="text-dim">
+                  <td colSpan={8} className="text-dim">
                     暂无告警
                   </td>
                 </tr>
               ) : (
-                alerts.map((a) => (
-                  <tr key={a.id}>
-                    <td className="mono tabular-nums whitespace-nowrap" title={a.time}>
-                      {a.time ? `${fmtDay(a.time)} ${fmtClock(a.time)}` : '-'}
-                    </td>
-                    <td className={`whitespace-nowrap ${severityClass(a.severity)}`}>
-                      {a.severity || '-'}
-                    </td>
-                    <td className="mono whitespace-nowrap">{a.rule_id || '-'}</td>
-                    <td className="whitespace-normal">{a.name || '-'}</td>
-                    <td className="mono whitespace-nowrap">
-                      {formatEndpoint(a.src_ip, a.src_port)} → {formatEndpoint(a.dst_ip, a.dst_port)}
-                    </td>
-                    <td className="mono whitespace-nowrap">
-                      {a.buffer || '-'}
-                      {typeof a.offset === 'number' ? `+${a.offset}` : ''}
-                    </td>
-                    <td className="mono">
-                      <span className="block truncate" style={{ maxWidth: '30rem' }} title={a.snippet}>
-                        {a.snippet || '-'}
-                      </span>
-                    </td>
-                  </tr>
-                ))
+                alerts.map((a) => {
+                  const captureId = a.capture_id ?? ''
+                  const pktNo = typeof a.pkt_no === 'number' ? a.pkt_no : 0
+                  // ★ 只在这两个条件同时成立时可用；动态工作台 capture_id 为空 ⇒ 禁用。
+                  const canViewPacket = captureId !== '' && pktNo > 0
+                  const packetTitle = !captureId
+                    ? '实时流量没有归档的包文件'
+                    : pktNo > 0
+                      ? `查看第 ${pktNo} 个包`
+                      : '该告警没有关联包号'
+                  return (
+                    <tr key={a.id}>
+                      <td className="mono tabular-nums whitespace-nowrap" title={a.time}>
+                        {a.time ? `${fmtDay(a.time)} ${fmtClock(a.time)}` : '-'}
+                      </td>
+                      <td className={`whitespace-nowrap ${severityClass(a.severity)}`}>
+                        {a.severity || '-'}
+                      </td>
+                      <td className="mono whitespace-nowrap">{a.rule_id || '-'}</td>
+                      <td className="whitespace-normal">{a.name || '-'}</td>
+                      <td className="mono whitespace-nowrap">
+                        {formatEndpoint(a.src_ip, a.src_port)} →{' '}
+                        {formatEndpoint(a.dst_ip, a.dst_port)}
+                      </td>
+                      <td className="mono whitespace-nowrap">
+                        {a.buffer || '-'}
+                        {typeof a.offset === 'number' ? `+${a.offset}` : ''}
+                      </td>
+                      <td className="mono">
+                        <span
+                          className="block truncate"
+                          style={{ maxWidth: '30rem' }}
+                          title={a.snippet}
+                        >
+                          {a.snippet || '-'}
+                        </span>
+                      </td>
+                      <td>
+                        {/* title 放在包一层的 span 上：禁用按钮上部分浏览器不弹 title。 */}
+                        <span className="inline-flex" title={packetTitle}>
+                          <button
+                            type="button"
+                            className="rounded-sm border border-subtle px-2 py-0.5 text-sm text-fg hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={!canViewPacket}
+                            onClick={() => {
+                              if (canViewPacket) setSelected({ captureId, no: pktNo })
+                            }}
+                          >
+                            {canViewPacket ? '查看包' : '—'}
+                          </button>
+                        </span>
+                      </td>
+                    </tr>
+                  )
+                })
               )}
             </tbody>
           </table>
         </div>
+      )}
+
+      {selected && (
+        <PacketDetail packet={selected} onClose={() => setSelected(null)} />
       )}
     </div>
   )

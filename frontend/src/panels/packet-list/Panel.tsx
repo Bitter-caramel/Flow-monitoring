@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { listPackets, type PacketRecord } from '../../api'
 import { useEvidenceCapture, useEvidenceId } from '../../shell/evidence'
+import { PacketDetail, type PacketRef } from '../../shell/PacketDetail'
 
 // 行内只显示 HH:MM:SS（本地时区，主信息），毫秒用淡色后缀单独渲染，
 // 避免每天/每条都重复年月日；完整 ISO 仍放在单元格 title 里（悬停可看）。
@@ -59,10 +60,13 @@ export function PacketListPanel() {
   const [offset, setOffset] = useState(0)
   const [pageSize, setPageSize] = useState(50)
   const [error, setError] = useState('')
+  // 当前点开的包（抽屉数据源）；null = 抽屉关闭。
+  const [selected, setSelected] = useState<PacketRef | null>(null)
 
-  // 切换证据包时回到第一页（旧 offset 对新文件没有意义）。
+  // 切换证据包时回到第一页（旧 offset 对新文件没有意义），并关闭抽屉。
   useEffect(() => {
     setOffset(0)
+    setSelected(null)
   }, [captureId])
 
   // 加载包列表（页大小变化时 offset 已归零，见 pageSize 的 onChange）
@@ -157,26 +161,46 @@ export function PacketListPanel() {
                 </td>
               </tr>
             ) : (
-              packets.map((p) => (
-                <tr key={p.no}>
-                  <td className="mono">{p.no}</td>
-                  <td className="mono tabular-nums whitespace-nowrap" title={p.time}>
-                    {p.time ? (
-                      <>
-                        {fmtClock(p.time)}
-                        <span className="text-dim">{fmtMillis(p.time)}</span>
-                      </>
-                    ) : (
-                      '-'
-                    )}
-                  </td>
-                  <td className="mono">{formatEndpoint(p.src_ip, p.src_port)}</td>
-                  <td className="mono">{formatEndpoint(p.dst_ip, p.dst_port)}</td>
-                  <td>{p.proto}</td>
-                  <td className="mono">{p.cap_len}</td>
-                  <td className="mono whitespace-normal">{p.info}</td>
-                </tr>
-              ))
+              packets.map((p) => {
+                const isSelected = selected?.captureId === captureId && selected.no === p.no
+                return (
+                  <tr
+                    key={p.no}
+                    className="cursor-pointer"
+                    title="点击查看包详情"
+                    onClick={() => setSelected({ captureId, no: p.no })}
+                    style={
+                      isSelected ? { backgroundColor: 'var(--bg-elevated)' } : undefined
+                    }
+                  >
+                    <td
+                      className="mono"
+                      style={
+                        isSelected
+                          ? { boxShadow: 'inset 3px 0 0 var(--accent)' }
+                          : undefined
+                      }
+                    >
+                      {p.no}
+                    </td>
+                    <td className="mono tabular-nums whitespace-nowrap" title={p.time}>
+                      {p.time ? (
+                        <>
+                          {fmtClock(p.time)}
+                          <span className="text-dim">{fmtMillis(p.time)}</span>
+                        </>
+                      ) : (
+                        '-'
+                      )}
+                    </td>
+                    <td className="mono">{formatEndpoint(p.src_ip, p.src_port)}</td>
+                    <td className="mono">{formatEndpoint(p.dst_ip, p.dst_port)}</td>
+                    <td>{p.proto}</td>
+                    <td className="mono">{p.cap_len}</td>
+                    <td className="mono whitespace-normal">{p.info}</td>
+                  </tr>
+                )
+              })
             )}
           </tbody>
         </table>
@@ -233,6 +257,10 @@ export function PacketListPanel() {
           条
         </label>
       </div>
+
+      {selected && (
+        <PacketDetail packet={selected} onClose={() => setSelected(null)} />
+      )}
     </div>
   )
 }
