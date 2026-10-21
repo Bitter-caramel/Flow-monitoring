@@ -423,6 +423,8 @@ export interface RunRecord {
   id: string
   mode: string
   source: string
+  /** 静态分析所属的抓包文件 ID（后端 runView.capture_id；live/旧数据可能缺省）。 */
+  capture_id?: string
   state: string
   packets: number
   alerts: number

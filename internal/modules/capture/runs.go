@@ -71,29 +71,31 @@ type captureRun struct {
 
 // runView 是 captureRun 的只读快照（JSON 输出用）。
 type runView struct {
-	ID       string    `json:"id"`
-	Mode     string    `json:"mode"`
-	Source   string    `json:"source"`
-	State    string    `json:"state"`
-	Packets  int       `json:"packets"`
-	Alerts   int       `json:"alerts"`
-	Err      string    `json:"err,omitempty"`
-	Started  time.Time `json:"started"`
-	Finished time.Time `json:"finished"`
+	ID        string    `json:"id"`
+	Mode      string    `json:"mode"`
+	Source    string    `json:"source"`
+	CaptureID string    `json:"capture_id,omitempty"`
+	State     string    `json:"state"`
+	Packets   int       `json:"packets"`
+	Alerts    int       `json:"alerts"`
+	Err       string    `json:"err,omitempty"`
+	Started   time.Time `json:"started"`
+	Finished  time.Time `json:"finished"`
 }
 
 // runViewOf 读取 Run 的只读快照；调用方必须持有 m.mu。
 func runViewOf(r *captureRun) runView {
 	return runView{
-		ID:       r.ID,
-		Mode:     r.Mode,
-		Source:   r.Source,
-		State:    r.State,
-		Packets:  r.Packets,
-		Alerts:   r.Alerts,
-		Err:      r.Err,
-		Started:  r.Started,
-		Finished: r.Finished,
+		ID:        r.ID,
+		Mode:      r.Mode,
+		Source:    r.Source,
+		CaptureID: r.captureID,
+		State:     r.State,
+		Packets:   r.Packets,
+		Alerts:    r.Alerts,
+		Err:       r.Err,
+		Started:   r.Started,
+		Finished:  r.Finished,
 	}
 }
 

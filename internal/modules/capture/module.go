@@ -176,7 +176,9 @@ func (m *captureModule) start(host plugin.Host, cfg plugin.ConfigSnapshot) error
 		m.setRunErr("capture: 打开数据源失败: " + err.Error())
 		return nil
 	}
-	if _, err := m.addRun(modeLive, src.Describe(), src.Describe(), src); err != nil {
+	// ★ capture_id 传空：live Run 没有"已导入的抓包文件"这一归属。
+	//   数据源信息已经在 source 里（如 "replay:sqli.pcapng"），不要塞进 capture_id 伪造归属。
+	if _, err := m.addRun(modeLive, src.Describe(), "", src); err != nil {
 		_ = src.Close()
 		m.setRunErr("capture: 创建 live Run 失败: " + err.Error())
 		return nil

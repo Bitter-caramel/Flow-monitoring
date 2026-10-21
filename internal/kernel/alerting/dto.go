@@ -25,9 +25,12 @@ type Alert struct {
 	DstPort  uint16 `json:"dst_port"`
 	Proto    string `json:"proto"`
 	StreamID int    `json:"stream_id"`
-	Buffer   string `json:"buffer"`
-	Offset   int    `json:"offset"`
-	Snippet  string `json:"snippet"`
+	// PktNo 是命中告警所在的包号（capture 帧序号，从 1 起）。
+	// 用 omitempty：兼容不含 pkt_no 的旧载荷，0 值不输出。
+	PktNo   int    `json:"pkt_no,omitempty"`
+	Buffer  string `json:"buffer"`
+	Offset  int    `json:"offset"`
+	Snippet string `json:"snippet"`
 
 	// 分析任务归属：run_id 标识一次分析任务，mode 标识工作台（live/static）。
 	// 两者用 omitempty，兼容阶段 2 之前不含这些字段的旧载荷。

@@ -85,6 +85,17 @@ function formatEndpoint(ip: string, port: number): string {
 }
 
 /**
+ * 包号（后端 alerting.Alert 的 pkt_no）。
+ *
+ * ★ 本任务的硬约束不允许改 alert-list/api.ts，故这里就地读取可选字段：
+ *   旧载荷/实时事件可能没有 pkt_no（Go omitempty 会直接省略），统一显示 "—"。
+ */
+function formatPktNo(a: AlertRecord): string {
+  const raw = (a as AlertRecord & { pkt_no?: unknown }).pkt_no
+  return typeof raw === 'number' && raw > 0 ? String(raw) : '—'
+}
+
+/**
  * 实时告警面板。
  *
  * 数据流：
@@ -240,7 +251,7 @@ export function AlertListPanel() {
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
       <div className="flex shrink-0 flex-wrap items-baseline gap-3">
-        <h2 className="text-lg font-semibold">实时告警</h2>
+        <h2 className="text-lg font-semibold">{wb === 'live' ? '实时告警' : '告警'}</h2>
         {isLive && (
           <span className={connected ? 'text-ok' : 'text-warn'} title={connected ? 'WebSocket 已连接' : 'WebSocket 重连中'}>
             {connected ? '● 已连接' : '○ 重连中'}
@@ -263,6 +274,7 @@ export function AlertListPanel() {
           <thead>
             <tr>
               <th>时间</th>
+              <th>包号</th>
               <th>严重度</th>
               <th>规则ID</th>
               <th>规则名</th>
@@ -274,10 +286,8 @@ export function AlertListPanel() {
           <tbody>
             {alerts.length === 0 ? (
               <tr>
-                <td colSpan={7} className="text-dim">
-                  {wb === 'static'
-                    ? '静态分析暂无告警（静态检测将在后续阶段接入）'
-                    : '暂无告警'}
+                <td colSpan={8} className="text-dim">
+                  暂无告警
                 </td>
               </tr>
             ) : (
@@ -286,6 +296,7 @@ export function AlertListPanel() {
                   <td className="mono tabular-nums whitespace-nowrap" title={a.time}>
                     {a.time ? `${fmtDay(a.time)} ${fmtClock(a.time)}` : '-'}
                   </td>
+                  <td className="mono tabular-nums whitespace-nowrap">{formatPktNo(a)}</td>
                   <td className={`whitespace-nowrap ${severityClass(a.severity)}`}>
                     {a.severity || '-'}
                   </td>

@@ -335,3 +335,39 @@ func TestFinishedRunsDoNotConsumeCapacity(t *testing.T) {
 		}
 	}
 }
+
+// TestRunViewIncludesCaptureID Run 视图必须带出 capture_id（前端按它把 Run 归到文件）。
+//
+// ★ captureRun 里是私有字段 captureID；若 runViewOf 忘了快照，
+// GET /runs 的 JSON 就没有 capture_id，静态工作台只能显示"未分析"。
+func TestRunViewIncludesCaptureID(t *testing.T) {
+	m, _, h := newStaticModule(t, 0)
+
+	rec := createStaticRun(t, h, "cap-sqli")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /runs 返回 %d，期望 201（body=%s）", rec.Code, rec.Body.String())
+	}
+	v := decodeRunView(t, rec)
+	if v.CaptureID != "cap-sqli" {
+		t.Fatalf("POST 返回的 capture_id = %q，期望 cap-sqli", v.CaptureID)
+	}
+	waitRunFinished(t, m, v.ID)
+
+	// 列表接口同样要带 capture_id（前端实际读的是 GET /runs）。
+	req := httptest.NewRequest(http.MethodGet, httpBase+"/runs", nil)
+	lrec := httptest.NewRecorder()
+	h.ServeHTTP(lrec, req)
+	if lrec.Code != http.StatusOK {
+		t.Fatalf("GET /runs 返回 %d，期望 200", lrec.Code)
+	}
+	if body := lrec.Body.String(); !strings.Contains(body, `"capture_id":"cap-sqli"`) {
+		t.Fatalf("GET /runs 的 JSON 缺 capture_id: %s", body)
+	}
+	var resp runsResponse
+	if err := json.Unmarshal(lrec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("GET /runs 响应不是合法 JSON: %v", err)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].CaptureID != "cap-sqli" {
+		t.Fatalf("GET /runs items = %+v，期望单条且 capture_id=cap-sqli", resp.Items)
+	}
+}

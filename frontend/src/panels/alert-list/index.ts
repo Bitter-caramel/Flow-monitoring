@@ -10,7 +10,7 @@ import { AlertListPanel } from './Panel'
 registerPanel(
   {
     id: 'panels.alert-list',
-    name: '实时告警',
+    name: '告警',
     version: '1.0.0',
     description: '订阅宿主告警 WebSocket，实时滚动显示（历史 + 增量）',
     layer: 'L1',

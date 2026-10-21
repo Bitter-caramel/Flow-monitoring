@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ApiError,
   createStaticRun,
-  deleteRun,
   fetchRuns,
   listCaptures,
   type CaptureRecord,
@@ -12,11 +11,11 @@ import {
 /** 轮询间隔：仅当存在 running 任务时生效。 */
 const POLL_INTERVAL_MS = 2000
 
-/** 静态工作台的告警面板 hash（点击告警数时跳转）。 */
-const ALERT_PANEL_HASH = '#/static/panels.alert-list'
-
 /** 并发上限文案（后端 defaultMaxRuns=4，409 时提示）。 */
 const TOO_MANY_RUNS_MESSAGE = '并发分析已达上限（4），请等待现有任务结束'
+
+/** captures 为空时的空态文案。 */
+const EMPTY_CAPTURES_MESSAGE = '还没有导入任何抓包文件，请先在「抓包导入」上传'
 
 /** 把任意异常转成可展示的文案（优先 Error.message，避免 "Error: " 前缀）。 */
 function errText(e: unknown): string {
@@ -24,72 +23,56 @@ function errText(e: unknown): string {
   return String(e)
 }
 
-/** 状态 → 颜色令牌工具类（var(--accent)/var(--ok)/var(--danger)，不硬编码颜色）。 */
-function stateClass(state: string): string {
-  switch (state) {
-    case 'running':
-      return 'text-accent'
-    case 'done':
-      return 'text-ok'
-    case 'error':
-      return 'text-danger'
-    default:
-      return 'text-dim'
-  }
-}
-
-/** 状态 → 中文标签；未知值原样透传（不隐藏后端新状态）。 */
-function stateLabel(state: string): string {
-  switch (state) {
-    case 'running':
-      return '运行中'
-    case 'done':
-      return '完成'
-    case 'error':
-      return '错误'
-    default:
-      return state || '-'
-  }
-}
-
-/**
- * 耗时（finished - started，秒）。
- *
- * 运行中 finished 是 Go 零值时间（远早于 started），此时返回 "—"，
- * 不再编造一个负耗时。
- */
-function formatElapsed(run: RunRecord): string {
-  const started = Date.parse(run.started)
-  const finished = Date.parse(run.finished)
-  if (!Number.isFinite(started) || !Number.isFinite(finished)) return '—'
-  // 运行中 finished 是 Go 零值时间（远早于 started）；相等则视为 0 耗时。
-  if (finished < started) return '—'
-  return `${((finished - started) / 1000).toFixed(2)} s`
-}
-
+/** 文件大小的人类可读形式（B/KB/MB）。 */
 function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
 
+/** 状态标签 + 颜色令牌工具类（一律 var(--…)，不硬编码颜色）。 */
+function statusOf(run: RunRecord | undefined): { label: string; className: string } {
+  if (!run) return { label: '未分析', className: 'text-dim' }
+  switch (run.state) {
+    case 'running':
+      return { label: '分析中', className: 'text-accent' }
+    case 'done':
+      return { label: '完成', className: 'text-ok' }
+    case 'error':
+      return { label: '失败', className: 'text-danger' }
+    default:
+      return { label: run.state || '-', className: 'text-dim' }
+  }
+}
+
+/** a 是否比 b 更新（started 相同时用 id 兜底，避免不稳定排序）。 */
+function isNewerRun(a: RunRecord, b: RunRecord): boolean {
+  const ta = Date.parse(a.started)
+  const tb = Date.parse(b.started)
+  if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) return ta > tb
+  return a.id > b.id
+}
+
 /**
- * 分析任务面板：上方发起静态分析，下方查看 Run 进度。
+ * 分析任务面板：一行一个抓包文件（发起分析 / 看状态 / 看告警数）。
  *
- * 实质功能（不装样子）：真实调 capture 的 Run 接口；运行中轮询，
- * 全部结束或组件卸载时清理定时器（避免重复请求与内存泄漏）。
+ * 数据：captures（文件清单）+ runs（GET /api/capture/runs，只取 mode=static 且有
+ * capture_id 的），按 capture_id 分组、每组取 started 最新的一条作为该文件"最近一次分析"。
+ *
+ * ★ 同一文件分析多次也只显示一行；旧数据（capture_id 为空）直接跳过。
+ * ★ 运行中每 2 秒轮询；全部结束或组件卸载时清理定时器。
  */
 export function AnalysisRunsPanel() {
   const [captures, setCaptures] = useState<CaptureRecord[]>([])
   const [runs, setRuns] = useState<RunRecord[]>([])
   const [capturesError, setCapturesError] = useState('')
   const [runsError, setRunsError] = useState('')
-  const [createError, setCreateError] = useState('')
   const [creatingId, setCreatingId] = useState<string | null>(null)
-  const [stoppingId, setStoppingId] = useState<string | null>(null)
+  const [rowErrors, setRowErrors] = useState<Record<string, string>>({})
 
-  // 防止轮询重叠：上一次请求未返回时跳过本轮。
-  const runsInFlight = useRef(false)
+  // 请求序号：轮询与"分析成功后刷新"可能并发，只让最新一次响应落地（防竞态）。
+  const refreshSeq = useRef(0)
 
   const loadCaptures = useCallback(async () => {
     try {
@@ -102,16 +85,15 @@ export function AnalysisRunsPanel() {
   }, [])
 
   const refreshRuns = useCallback(async () => {
-    if (runsInFlight.current) return
-    runsInFlight.current = true
+    const seq = ++refreshSeq.current
     try {
       const page = await fetchRuns()
-      setRuns(page.items)
+      if (seq !== refreshSeq.current) return
+      // 只保留静态分析且带 capture_id 的 Run；旧数据缺 capture_id ⇒ 跳过。
+      setRuns(page.items.filter((r) => r.mode === 'static' && !!r.capture_id))
       setRunsError('')
     } catch (e) {
-      setRunsError(errText(e))
-    } finally {
-      runsInFlight.current = false
+      if (seq === refreshSeq.current) setRunsError(errText(e))
     }
   }, [])
 
@@ -121,7 +103,18 @@ export function AnalysisRunsPanel() {
     void refreshRuns()
   }, [loadCaptures, refreshRuns])
 
-  // ★ 只依赖布尔值：runs 每次轮询都会换新数组，若直接依赖 runs 会反复重建定时器。
+  // 按 capture_id 分组，每组取 started 最新的一条（显式取最新，不依赖后端顺序）。
+  const latestByCapture = useMemo(() => {
+    const map = new Map<string, RunRecord>()
+    for (const r of runs) {
+      if (r.mode !== 'static' || !r.capture_id) continue
+      const prev = map.get(r.capture_id)
+      if (!prev || isNewerRun(r, prev)) map.set(r.capture_id, r)
+    }
+    return map
+  }, [runs])
+
+  // ★ 只依赖布尔值：runs 每次轮询都会换新数组，直接依赖会反复重建定时器。
   const hasRunning = runs.some((r) => r.state === 'running')
 
   // 仅当存在 running 任务时每 2 秒刷新；全部结束或卸载时 clearInterval。
@@ -134,168 +127,94 @@ export function AnalysisRunsPanel() {
   }, [hasRunning, refreshRuns])
 
   async function onAnalyze(captureId: string) {
-    // 连点保护：一次只允许一个发起请求在途。
+    // 并发保护：一次只允许一个发起请求在途（按钮同时禁用）。
     if (creatingId !== null) return
     setCreatingId(captureId)
-    setCreateError('')
+    setRowErrors((prev) => {
+      if (!(captureId in prev)) return prev
+      const next = { ...prev }
+      delete next[captureId]
+      return next
+    })
     try {
-      const run = await createStaticRun(captureId)
-      // 立刻插到列表顶部（按 id 去重，避免与轮询结果重复）。
-      setRuns((prev) => [run, ...prev.filter((r) => r.id !== run.id)])
+      await createStaticRun(captureId)
+      // 成功后刷新列表（新 Run 由 GET /runs 返回，按 capture_id 归到该文件）。
+      await refreshRuns()
     } catch (e) {
       // 409 = 并发 Run 已达上限；其余（400/404/…）原样展示后端 error 文案。
-      if (e instanceof ApiError && e.status === 409) {
-        setCreateError(TOO_MANY_RUNS_MESSAGE)
-      } else {
-        setCreateError(errText(e))
-      }
+      const msg =
+        e instanceof ApiError && e.status === 409 ? TOO_MANY_RUNS_MESSAGE : errText(e)
+      setRowErrors((prev) => ({ ...prev, [captureId]: msg }))
     } finally {
       setCreatingId(null)
     }
   }
 
-  async function onStop(id: string) {
-    if (stoppingId !== null) return
-    setStoppingId(id)
-    setRunsError('')
-    try {
-      const run = await deleteRun(id)
-      setRuns((prev) => prev.map((r) => (r.id === run.id ? run : r)))
-    } catch (e) {
-      setRunsError(errText(e))
-    } finally {
-      setStoppingId(null)
-    }
-  }
-
-  function openAlerts() {
-    // 切到静态工作台的告警面板（16-3 起静态分析已能产出 static 告警）。
-    window.location.hash = ALERT_PANEL_HASH
-  }
+  const loadError = capturesError || runsError
 
   return (
     <div className="flex flex-col gap-4">
       <section className="flex flex-col gap-2">
-        <div className="flex items-baseline gap-2">
+        <div className="flex flex-wrap items-baseline gap-2">
           <h2 className="text-lg font-semibold">分析任务</h2>
-          <span className="text-sm text-dim">选择已导入的抓包文件发起静态分析</span>
+          <span className="text-sm text-dim">一行一个抓包文件：发起分析、查看状态与告警数</span>
+          {hasRunning && (
+            <span className="text-sm text-accent">有任务运行中，每 2 秒自动刷新</span>
+          )}
         </div>
 
-        {createError && <div className="sev-danger">{createError}</div>}
-        {capturesError && <div className="sev-danger">{capturesError}</div>}
+        {loadError && <div className="sev-danger">{loadError}</div>}
 
         <div className="panel-surface overflow-auto">
           <table>
             <thead>
               <tr>
-                <th>文件名</th>
+                <th>文件</th>
                 <th>包数</th>
                 <th>大小</th>
+                <th>状态</th>
+                <th>告警</th>
                 <th>操作</th>
               </tr>
             </thead>
             <tbody>
               {captures.length === 0 ? (
                 <tr>
-                  <td colSpan={4} className="text-dim">
-                    暂无已导入的抓包文件，请先在「抓包导入」中上传
-                  </td>
-                </tr>
-              ) : (
-                captures.map((c) => (
-                  <tr key={c.id}>
-                    <td>{c.name}</td>
-                    <td className="tabular-nums">{c.packet_count}</td>
-                    <td className="tabular-nums">{formatBytes(c.byte_size)}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="rounded-sm border border-subtle px-2.5 py-1 text-sm text-fg hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-50"
-                        onClick={() => void onAnalyze(c.id)}
-                        disabled={creatingId !== null}
-                      >
-                        {creatingId === c.id ? '分析中…' : '分析'}
-                      </button>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section className="flex flex-col gap-2">
-        <div className="flex items-baseline gap-2">
-          <h2 className="text-lg font-semibold">任务列表</h2>
-          <span className="text-sm text-dim">
-            {hasRunning ? '有任务运行中，每 2 秒自动刷新' : `共 ${runs.length} 个任务`}
-          </span>
-        </div>
-
-        {runsError && <div className="sev-danger">{runsError}</div>}
-
-        <div className="panel-surface overflow-auto">
-          <table>
-            <thead>
-              <tr>
-                <th>状态</th>
-                <th>来源</th>
-                <th>包数</th>
-                <th>告警数</th>
-                <th>耗时</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {runs.length === 0 ? (
-                <tr>
                   <td colSpan={6} className="text-dim">
-                    暂无分析任务，先在上方选择一个抓包文件
+                    {EMPTY_CAPTURES_MESSAGE}
                   </td>
                 </tr>
               ) : (
-                runs.map((r) => (
-                  <tr key={r.id}>
-                    <td
-                      className={`whitespace-nowrap ${stateClass(r.state)}`}
-                      title={r.err || r.state}
-                    >
-                      {stateLabel(r.state)}
-                    </td>
-                    <td>{r.source || '-'}</td>
-                    <td className="tabular-nums">{r.packets}</td>
-                    <td className="tabular-nums">
-                      {r.alerts > 0 ? (
-                        <button
-                          type="button"
-                          className="text-link underline-offset-2 hover:underline"
-                          onClick={openAlerts}
-                          title="在告警面板中查看"
-                        >
-                          {r.alerts}
-                        </button>
-                      ) : (
-                        0
-                      )}
-                    </td>
-                    <td className="whitespace-nowrap tabular-nums">{formatElapsed(r)}</td>
-                    <td>
-                      {r.state === 'running' ? (
-                        <button
-                          type="button"
-                          className="rounded-sm border border-subtle px-2.5 py-1 text-sm text-fg hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-50"
-                          onClick={() => void onStop(r.id)}
-                          disabled={stoppingId !== null}
-                        >
-                          {stoppingId === r.id ? '停止中…' : '停止'}
-                        </button>
-                      ) : (
-                        <span className="text-dim">—</span>
-                      )}
-                    </td>
-                  </tr>
-                ))
+                captures.map((c) => {
+                  const run = latestByCapture.get(c.id)
+                  const status = statusOf(run)
+                  const busy = creatingId === c.id
+                  const rowError = rowErrors[c.id]
+                  return (
+                    <tr key={c.id}>
+                      <td className="whitespace-normal">{c.name}</td>
+                      <td className="tabular-nums">{c.packet_count}</td>
+                      <td className="tabular-nums">{formatBytes(c.byte_size)}</td>
+                      <td className={`whitespace-nowrap ${status.className}`} title={run?.err || status.label}>
+                        {status.label}
+                      </td>
+                      <td className="tabular-nums">{run ? run.alerts : '—'}</td>
+                      <td>
+                        <div className="flex flex-col gap-1">
+                          <button
+                            type="button"
+                            className="rounded-sm border border-subtle px-2.5 py-1 text-sm text-fg hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-50"
+                            onClick={() => void onAnalyze(c.id)}
+                            disabled={creatingId !== null}
+                          >
+                            {busy ? '提交中…' : run ? '重新分析' : '分析'}
+                          </button>
+                          {rowError && <span className="text-sm text-danger">{rowError}</span>}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })
               )}
             </tbody>
           </table>
