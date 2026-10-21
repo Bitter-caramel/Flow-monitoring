@@ -12,6 +12,7 @@ import { App } from './shell/App'
 // 新增面板只需在此追加一行 import，无需改 shell
 import './panels/capture-import'
 import './panels/packet-list'
+import './panels/analysis-runs'
 import './panels/module-graph'
 import './panels/alert-list'
 

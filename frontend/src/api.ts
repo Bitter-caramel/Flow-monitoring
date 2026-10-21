@@ -65,14 +65,31 @@ function requestHeaders(method: string): Record<string, string> {
   return headers
 }
 
+/**
+ * API 错误：在保留 Error 语义的同时携带 HTTP 状态码。
+ *
+ * ★ 界面需要区分具体状态（如 409 并发上限 vs 404 资源不存在），
+ *   但不想让每个调用方自己解析文案；message 优先是后端 error 原文，可直接展示。
+ *   继承 Error ⇒ 既有 `catch (e) { String(e) }` 的调用方完全兼容。
+ */
+export class ApiError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
 /** 非 2xx 统一抛错；401 给出可操作的 Token 提示，其余优先用后端 error 文案。 */
 async function throwIfNotOK(resp: Response): Promise<void> {
   if (resp.ok) return
   if (resp.status === 401) {
-    throw new Error(TOKEN_REQUIRED_MESSAGE)
+    throw new ApiError(TOKEN_REQUIRED_MESSAGE, 401)
   }
   const detail = await readErrorDetail(resp)
-  throw new Error(detail || `HTTP ${resp.status} ${resp.statusText}`)
+  throw new ApiError(detail || `HTTP ${resp.status} ${resp.statusText}`, resp.status)
 }
 
 /** 上传 pcap 文件（multipart）。 */
@@ -349,12 +366,23 @@ async function readErrorDetail(resp: Response): Promise<string> {
   return text
 }
 
-/** 带后端错误文案的 JSON POST（不设短超时：级联停模块可能耗时较久）。 */
-async function postJSON<T>(path: string): Promise<T> {
-  const resp = await fetch(path, {
-    method: 'POST',
-    headers: { Accept: 'application/json', ...requestHeaders('POST') },
-  })
+/**
+ * 带后端错误文案的 JSON POST（不设短超时：级联停模块/发起分析可能耗时较久）。
+ *
+ * body 缺省时发送空请求体（既有调用零改动）；给出时按 JSON 编码并带 Content-Type。
+ * 非 2xx 由 throwIfNotOK 抛出 ApiError（含状态码与后端 error 原文）。
+ */
+async function postJSON<T>(path: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    ...requestHeaders('POST'),
+  }
+  let payload: string | undefined
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+    payload = JSON.stringify(body)
+  }
+  const resp = await fetch(path, { method: 'POST', headers, body: payload })
   await throwIfNotOK(resp)
   return (await resp.json()) as T
 }
@@ -383,4 +411,59 @@ export async function postModuleEnable(id: string): Promise<CascadeResult> {
 export async function postModuleDisable(id: string): Promise<CascadeResult> {
   const raw = await postJSON<CascadeResult>(`/api/modules/${encodeURIComponent(id)}/disable`)
   return normalizeCascade(raw)
+}
+
+/**
+ * 分析任务（Run）——对齐后端 capture.runView 的 JSON 字段。
+ *
+ * state ∈ "running" | "done" | "error"；运行中 finished 是 Go 的零值时间
+ * （"0001-01-01T00:00:00Z"），界面据此判定耗时未知。
+ */
+export interface RunRecord {
+  id: string
+  mode: string
+  source: string
+  state: string
+  packets: number
+  alerts: number
+  err?: string
+  started: string
+  finished: string
+}
+
+/** GET /api/capture/runs 的响应体（items 可能因 Go nil slice 变成 null）。 */
+export interface RunPage {
+  items: RunRecord[]
+  total: number
+}
+
+/** 与 normalizePage 相同约定：items 必为数组、total 必为非负数。 */
+function normalizeRunPage(raw: Partial<RunPage> | null | undefined): RunPage {
+  const items = Array.isArray(raw?.items) ? raw.items : []
+  const total = typeof raw?.total === 'number' && raw.total >= 0 ? raw.total : items.length
+  return { items, total }
+}
+
+/** 列出分析任务（GET /api/capture/runs；后端按 started 倒序）。 */
+export async function fetchRuns(timeoutMs = 3000): Promise<RunPage> {
+  const raw = await getJSON<Partial<RunPage>>('/api/capture/runs', timeoutMs)
+  return normalizeRunPage(raw)
+}
+
+/** 发起静态分析任务（POST /api/capture/runs），返回新建的 Run。 */
+export async function createStaticRun(captureId: string): Promise<RunRecord> {
+  return postJSON<RunRecord>('/api/capture/runs', {
+    mode: 'static',
+    capture_id: captureId,
+  })
+}
+
+/** 停止分析任务（DELETE /api/capture/runs/{id}；后端幂等，返回最新 Run）。 */
+export async function deleteRun(id: string): Promise<RunRecord> {
+  const resp = await fetch(`/api/capture/runs/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: { Accept: 'application/json', ...requestHeaders('DELETE') },
+  })
+  await throwIfNotOK(resp)
+  return (await resp.json()) as RunRecord
 }
