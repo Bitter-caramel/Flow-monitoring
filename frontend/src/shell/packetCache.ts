@@ -4,13 +4,13 @@
  * 目标：用户在包列表里逐包浏览、或从告警反复打开同一个包时，
  * 不必每次都打后端。缓存只在「真的点开过」之后写入，绝不预取。
  *
- * 策略（任务 16-7）：
+ * 策略（任务 16-7，元素类型在 16-9 从 PacketRecord 升级为 PacketDetail）：
  *   - key = `${captureId}:${no}`；
  *   - TTL = 5 分钟：读取时过期即删，视为未命中；
  *   - 容量上限 200 条：写入后若超限，淘汰最早写入的一条（Map 迭代顺序）。
  */
 
-import type { PacketRecord } from '../api'
+import type { PacketDetail } from '../api'
 
 /** 缓存有效期：5 分钟。 */
 export const PACKET_CACHE_TTL_MS = 5 * 60 * 1000
@@ -19,7 +19,7 @@ export const PACKET_CACHE_TTL_MS = 5 * 60 * 1000
 export const PACKET_CACHE_CAPACITY = 200
 
 interface CachedPacket {
-  rec: PacketRecord
+  rec: PacketDetail
   /** 写入时间（毫秒时间戳），用于 TTL 与淘汰。 */
   at: number
 }
@@ -42,7 +42,7 @@ export function readCachedPacket(
   captureId: string,
   no: number,
   now = Date.now(),
-): PacketRecord | null {
+): PacketDetail | null {
   if (!captureId || !Number.isFinite(no) || no <= 0) return null
   const key = packetCacheKey(captureId, no)
   const hit = cache.get(key)
@@ -63,7 +63,7 @@ export function readCachedPacket(
 export function writeCachedPacket(
   captureId: string,
   no: number,
-  rec: PacketRecord,
+  rec: PacketDetail,
   now = Date.now(),
 ): void {
   if (!captureId || !Number.isFinite(no) || no <= 0) return

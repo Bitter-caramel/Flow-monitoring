@@ -32,6 +32,36 @@ export interface PacketRecord {
   orig_len: number
 }
 
+/** 协议分层里的一个字段：{ k = v }。 */
+export interface PacketDetailField {
+  k: string
+  v: string
+}
+
+/** 协议分层里的一层；未知层也会给空数组（绝不 JSON null）。 */
+export interface PacketDetailLayer {
+  name: string
+  fields: PacketDetailField[]
+}
+
+/**
+ * 单包详情（GET /api/v1/captures/{id}/packets/{no}/detail）。
+ *
+ * 后端从原始抓包文件现解析：layers 是协议树、hex 是 Wireshark 风格十六进制行、
+ * payload_text 是 L7 可读载荷（最多 8 KB，超出时 payload_truncated=true）。
+ */
+export interface PacketDetail {
+  no: number
+  time: string
+  cap_len: number
+  orig_len: number
+  link_type: number
+  layers: PacketDetailLayer[]
+  hex: string[]
+  payload_text: string
+  payload_truncated: boolean
+}
+
 export interface PageResult<T> {
   items: T[]
   total: number
@@ -143,27 +173,50 @@ export async function listPackets(
 }
 
 /**
- * 取某 capture 的第 no 个包（1 起）。
+ * 归一化详情响应：Go 的 nil slice 会被编码成 JSON null，且字段可能缺省。
+ * 这里保证 layers/hex 一定是数组、字符串/数字一定有默认值，界面可直接遍历。
+ */
+function normalizePacketDetail(raw: Partial<PacketDetail> | null | undefined): PacketDetail {
+  const layers: PacketDetailLayer[] = Array.isArray(raw?.layers)
+    ? raw.layers.map((l) => ({
+        name: typeof l?.name === 'string' ? l.name : '',
+        fields: Array.isArray(l?.fields) ? l.fields : [],
+      }))
+    : []
+  return {
+    no: typeof raw?.no === 'number' ? raw.no : 0,
+    time: typeof raw?.time === 'string' ? raw.time : '',
+    cap_len: typeof raw?.cap_len === 'number' ? raw.cap_len : 0,
+    orig_len: typeof raw?.orig_len === 'number' ? raw.orig_len : 0,
+    link_type: typeof raw?.link_type === 'number' ? raw.link_type : 0,
+    layers,
+    hex: Array.isArray(raw?.hex) ? raw.hex : [],
+    payload_text: typeof raw?.payload_text === 'string' ? raw.payload_text : '',
+    payload_truncated: raw?.payload_truncated === true,
+  }
+}
+
+/**
+ * 取某 capture 的第 no 个包（1 起）的详情（协议分层 / 十六进制 / 载荷）。
  *
- * ★ 后端分页参数是 offset/limit（不是 page/page_size）：第 no 个包
- *   ⇒ `?offset=no-1&limit=1`。
- * ★ 后端查不到时返回空列表 ⇒ 这里返回 null，由界面显示「该包不存在」。
+ * ★ 走 16-8 新增的 GET .../packets/{no}/detail：一次请求拿齐三份数据，
+ *   不再像 16-7 那样用 offset/limit 分页取单条元数据。
+ * ★ 包不存在时后端返回 404；统一由 throwIfNotOK 抛 ApiError(404)，
+ *   界面据此显示「该包不存在或文件已被移除」。
  * ★ signal 让抽屉关闭/切换包时中止在途请求，避免迟到的旧响应覆盖新状态。
  */
-export async function fetchPacket(
+export async function fetchPacketDetail(
   captureId: string,
   no: number,
   signal?: AbortSignal,
-): Promise<PacketRecord | null> {
+): Promise<PacketDetail> {
   const safeNo = Number.isFinite(no) ? Math.floor(no) : 0
-  const offset = safeNo > 0 ? safeNo - 1 : 0
   const resp = await fetch(
-    `/api/v1/captures/${encodeURIComponent(captureId)}/packets?offset=${offset}&limit=1`,
+    `/api/v1/captures/${encodeURIComponent(captureId)}/packets/${safeNo}/detail`,
     { headers: requestHeaders('GET'), signal },
   )
   await throwIfNotOK(resp)
-  const page = normalizePage<PacketRecord>(await resp.json())
-  return page.items[0] ?? null
+  return normalizePacketDetail(await resp.json())
 }
 
 /**
