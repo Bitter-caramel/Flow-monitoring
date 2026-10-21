@@ -14,7 +14,9 @@ registerPanel(
     version: '1.0.0',
     description: '订阅宿主告警 WebSocket，实时滚动显示（历史 + 增量）',
     layer: 'L1',
-    workbenches: ['static', 'live'],
+    // ★ 只放 live：静态检测要到阶段 3（16-3）才接入，在那之前放进来就是"永远为空的面板"。
+    //   过滤逻辑（mode=static/live）已就绪，16-3 完成后把 'static' 加回来即可。
+    workbenches: ['live'],
     group: '结果',
     icon: '⚠',
   },

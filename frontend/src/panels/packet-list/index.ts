@@ -14,7 +14,10 @@ registerPanel(
     version: '1.0.0',
     description: '按 capture 分页查看数据包（Wireshark 风格）',
     layer: 'L1',
-    workbenches: ['static', 'live'],
+    // ★ 只放 static：它查的是 modules.query（已导入的文件）。
+    //   动态工作台需要的是"实时包流"，那个能力还没做（阶段 3 之后）；
+    //   在那之前放进 live 会让用户误以为能看到实时包。
+    workbenches: ['static'],
     group: '数据',
     icon: '▤',
     moduleId: 'modules.query',
