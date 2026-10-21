@@ -22,9 +22,11 @@ type publishedEvent struct {
 	data  []byte
 }
 
-// fakeHost 是 plugin.Host 的最小桩：只需要记录 Publish/Log，其余返回零值。
+// fakeHost 是 plugin.Host 的最小桩：记录 Publish/Log，并可从 captures 表
+// 返回固定的抓包记录（静态分析用例需要 CaptureGet 命中）。
 type fakeHost struct {
-	cfg plugin.ConfigSnapshot
+	cfg      plugin.ConfigSnapshot
+	captures map[string]plugin.CaptureRecord
 
 	mu        sync.Mutex
 	published []publishedEvent
@@ -73,8 +75,9 @@ func (h *fakeHost) UnregisterService(string) error { return nil }
 
 func (h *fakeHost) CaptureCreate(plugin.CaptureRecord) error { return nil }
 
-func (h *fakeHost) CaptureGet(string) (plugin.CaptureRecord, bool) {
-	return plugin.CaptureRecord{}, false
+func (h *fakeHost) CaptureGet(id string) (plugin.CaptureRecord, bool) {
+	rec, ok := h.captures[id]
+	return rec, ok
 }
 
 func (h *fakeHost) CaptureList(plugin.Page) plugin.CapturePage { return plugin.CapturePage{} }

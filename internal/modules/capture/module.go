@@ -1,11 +1,9 @@
 package capture
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
+	"net/http"
 	"sync"
 	"time"
 
@@ -22,8 +20,12 @@ import (
 // capture 只负责产出检测特征，不依赖具体消费者，避免把告警模块拖进本进程。
 const topicDetectFeature = "detect.feature"
 
-// modeLive 是本阶段唯一实际产出的工作台归属（静态分析到阶段 3 接入）。
-const modeLive = "live"
+// Run 的两种工作台归属：live 是启动时自动回放，static 是按 HTTP 请求
+// 分析已导入的抓包文件。
+const (
+	modeLive   = "live"
+	modeStatic = "static"
+)
 
 // detectSettings 是本模块从 ConfigSnapshot.Raw 里解析的私有配置段。
 // 字段 json tag 与 internal/kernel/config.DetectConfig 保持一致。
@@ -68,17 +70,20 @@ type featureEvent struct {
 type captureModule struct {
 	host plugin.Host
 
-	source Source
-	hp     *hotpath.Hotpath
-
-	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	stopOnce sync.Once
 
 	mu         sync.Mutex
 	started    bool
+	stopped    bool
 	runErr     string // 非空 ⇒ 数据源/规则加载失败（Health 如实上报）
 	panicCount int    // 被 recover 的坏包数（观测用）
+
+	// 规则集只读，可被多个 Run 共享；每个 Run 各自新建 hotpath。
+	ruleset *detect.RuleSet
+	dataDir string
+	maxRuns int
+	runs    map[string]*captureRun
 
 	// 测试注入口；nil 时使用生产实现。
 	newSource func(path string) (Source, error)
@@ -89,7 +94,7 @@ type captureModule struct {
 //
 // 对应 registry/backend-modules/capture.json：
 //   - L1 基础功能；
-//   - 不对外提供 HTTP（HTTPBase 留空）；
+//   - 对外提供 /api/capture HTTP 路由（Run 管理），由宿主网关反代；
 //   - 发布 detect.feature 事件主题。
 func Module() *plugin.Runtime {
 	m := &captureModule{}
@@ -99,7 +104,14 @@ func Module() *plugin.Runtime {
 			Name:     "采集与检测",
 			Version:  "0.1.0",
 			Layer:    plugin.LayerFoundation,
+			HTTPBase: httpBase,
 			Provides: []string{"capture.core", "detect.feature"},
+		},
+		// ★ MakeHandler 在 OnStart 之前执行：此刻把宿主桥与 DataDir 固定下来，
+		// 之后 handler 里的只读访问不再与 OnStart 竞争。
+		MakeHandler: func(host plugin.Host) (http.Handler, error) {
+			m.attachHost(host)
+			return m.handler(), nil
 		},
 		OnStart:  m.start,
 		OnStop:   m.stop,
@@ -113,10 +125,15 @@ func Module() *plugin.Runtime {
 //
 //	（这样宿主有机会看到"模块活着但不健康"的明确原因）。
 func (m *captureModule) start(host plugin.Host, cfg plugin.ConfigSnapshot) error {
-	m.host = host
+	m.attachHost(host)
 
 	m.mu.Lock()
 	m.started = true
+	m.stopped = false
+	m.ensureRunsLocked()
+	if m.dataDir == "" {
+		m.dataDir = cfg.DataDir
+	}
 	m.mu.Unlock()
 
 	var root struct {
@@ -131,10 +148,6 @@ func (m *captureModule) start(host plugin.Host, cfg plugin.ConfigSnapshot) error
 		m.setRunErr("capture: detect.rules_dir 为空，无法加载规则")
 		return nil
 	}
-	if settings.ReplayFile == "" {
-		m.setRunErr("capture: detect.replay_file 为空，没有数据源")
-		return nil
-	}
 
 	rs, report := detect.LoadDir(settings.RulesDir)
 	if rs == nil || report == nil {
@@ -147,57 +160,81 @@ func (m *captureModule) start(host plugin.Host, cfg plugin.ConfigSnapshot) error
 		m.setRunErr("capture: 加载规则目录 " + settings.RulesDir + " 失败: " + report.Issues[0])
 		return nil
 	}
-	hp := hotpath.New(rs)
+	// 规则集只读，多个 Run 共享；hotpath 由每个 Run 各自新建。
+	m.mu.Lock()
+	m.ruleset = rs
+	m.mu.Unlock()
 
-	mk := m.newSource
-	if mk == nil {
-		mk = func(path string) (Source, error) { return NewReplaySource(path) }
-	}
-	src, err := mk(settings.ReplayFile)
-	if err != nil {
-		hp.Close()
-		m.setRunErr("capture: 打开数据源失败: " + err.Error())
+	// detect.replay_file 为空 ⇒ 不自动开播，等待 HTTP 下发的静态分析任务。
+	if settings.ReplayFile == "" {
+		m.host.Log("info", "capture: detect.replay_file 为空，等待静态分析任务")
 		return nil
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-
-	m.mu.Lock()
-	m.hp = hp
-	m.source = src
-	m.cancel = cancel
-	m.mu.Unlock()
-
-	m.wg.Add(1)
-	go m.run(ctx, src, hp)
+	src, err := m.openSource(settings.ReplayFile)
+	if err != nil {
+		m.setRunErr("capture: 打开数据源失败: " + err.Error())
+		return nil
+	}
+	if _, err := m.addRun(modeLive, src.Describe(), src.Describe(), src); err != nil {
+		_ = src.Close()
+		m.setRunErr("capture: 创建 live Run 失败: " + err.Error())
+		return nil
+	}
 	return nil
 }
 
-// stop 取消后台回放、关闭数据源与热路径（幂等）。
+// attachHost 固定宿主桥与 DataDir（幂等；MakeHandler 与测试路径共用）。
+//
+// ★ 只写一次（nil 时），之后 handler 的只读访问不会与 OnStart 竞争。
+func (m *captureModule) attachHost(host plugin.Host) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.host == nil {
+		m.host = host
+	}
+	if m.dataDir == "" && host != nil {
+		m.dataDir = host.Config().DataDir
+	}
+}
+
+// openSource 按需打开数据源；测试可注入 newSource。
+func (m *captureModule) openSource(path string) (Source, error) {
+	if m.newSource != nil {
+		return m.newSource(path)
+	}
+	return NewReplaySource(path)
+}
+
+// stop 取消所有 Run、等待它们退出并关闭各自的 hotpath（幂等）。
 func (m *captureModule) stop() error {
 	var firstErr error
 	m.stopOnce.Do(func() {
 		m.mu.Lock()
-		cancel := m.cancel
-		src := m.source
-		hp := m.hp
-		m.cancel = nil
-		m.source = nil
-		m.hp = nil
 		m.started = false
+		m.stopped = true
+		runs := make([]*captureRun, 0, len(m.runs))
+		for _, r := range m.runs {
+			runs = append(runs, r)
+		}
 		m.mu.Unlock()
 
-		if cancel != nil {
-			cancel()
-		}
-		m.wg.Wait()
-		if src != nil {
-			if err := src.Close(); err != nil && firstErr == nil {
-				firstErr = err
+		for _, r := range runs {
+			if r.cancel != nil {
+				r.cancel()
 			}
 		}
-		if hp != nil {
-			hp.Close()
+		m.wg.Wait()
+
+		for _, r := range runs {
+			if r.hp != nil {
+				r.hp.Close()
+			}
+			if r.src != nil {
+				if err := r.src.Close(); err != nil && firstErr == nil {
+					firstErr = err
+				}
+			}
 		}
 	})
 	return firstErr
@@ -214,52 +251,6 @@ func (m *captureModule) health() plugin.HealthStatus {
 		return plugin.HealthStatus{Healthy: false, Message: "capture: 未启动"}
 	}
 	return plugin.HealthStatus{Healthy: true}
-}
-
-// run 是后台主循环：逐帧读取 → 解码 → 检测 → 发布 detect.feature。
-func (m *captureModule) run(ctx context.Context, src Source, hp *hotpath.Hotpath) {
-	defer m.wg.Done()
-
-	packets := 0
-	alerts := 0
-	publishErrs := 0
-	captureID := src.Describe()
-	// run_id 在本次分析任务启动时生成一次，格式 run-<unixnano>；cross-process 唯一即可。
-	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
-
-	for {
-		frame, err := src.Next(ctx)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			m.setRunErr(fmt.Sprintf("capture: 读取数据源失败: %v", err))
-			return
-		}
-
-		packets++
-		hits := m.processFrame(hp, frame, packets)
-		for _, h := range hits {
-			alerts++
-			payload, err := json.Marshal(newFeatureEvent(captureID, runID, modeLive, h))
-			if err != nil {
-				publishErrs++
-				m.host.Log("error", fmt.Sprintf("capture: 序列化告警 %s 失败: %v", h.RuleID, err))
-				continue
-			}
-			if err := m.host.Publish(topicDetectFeature, payload); err != nil {
-				publishErrs++
-				m.host.Log("error", fmt.Sprintf("capture: 发布告警 %s 失败: %v", h.RuleID, err))
-			}
-		}
-	}
-
-	m.host.Log("info", fmt.Sprintf(
-		"capture: replay finished, packets=%d alerts=%d publish_errs=%d",
-		packets, alerts, publishErrs))
 }
 
 // processFrame 解码并处理单帧；recover 保证一个坏包不会打死整个进程（技术债 #10）。

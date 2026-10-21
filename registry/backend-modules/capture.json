@@ -6,5 +6,6 @@
   "layer": "L1",
   "enabled": true,
   "binary": "capture",
+  "http_base": "/api/capture",
   "provides": ["capture.core", "detect.feature"]
 }
