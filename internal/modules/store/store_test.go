@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"flow-monitoring/internal/kernel/storage"
+	"flow-monitoring/pkg/plugin"
 )
 
 // TestNullableTime 零值转 nil，非零值原样返回。
@@ -262,5 +263,137 @@ func TestPostgres_ListByEndpoints_Integration(t *testing.T) {
 	}
 	if len(none.Items) != 0 {
 		t.Errorf("不存在的连接 Items len = %d, want 0", len(none.Items))
+	}
+}
+
+// TestPostgres_RunSaveList_Integration 是 18a「Run 持久化」的真库测试。
+//
+// 覆盖：
+//   - RunSave 后 RunList 能读回（含 capture_id / 计数 / 时间）；
+//   - 同 id 二次保存走 UPSERT（不报错且字段被更新）；
+//   - finished 零值写 NULL，读回仍是零值（不出现 0001 年份）；
+//   - RunList 按 started DESC 排序。
+//
+// 通过 FLOW_TEST_PG_DSN 提供连接串时运行，否则跳过（与其它集成测试同一约定）。
+func TestPostgres_RunSaveList_Integration(t *testing.T) {
+	dsn := testDSN()
+	if dsn == "" {
+		t.Skip("FLOW_TEST_PG_DSN 未设置，跳过 PostgreSQL 集成测试")
+	}
+
+	ctx := context.Background()
+	pg, err := New(ctx, dsn, 5)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer pg.Close()
+	if err := pg.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	idA, idB := "run-it-a-"+suffix, "run-it-b-"+suffix
+	for _, id := range []string{idA, idB} {
+		id := id
+		defer func() { _, _ = pg.pool.Exec(context.Background(), `DELETE FROM runs WHERE id = $1`, id) }()
+	}
+
+	// A 用"很久以前"的 started；B 用"很久以后"的 started，保证排序断言稳定。
+	startedA := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	startedB := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	recA := plugin.RunRecord{
+		ID: idA, Mode: "static", Source: "replay:sqli", CaptureID: "cap-it-1",
+		State: "running", Packets: 3, Alerts: 1, Started: startedA,
+	}
+	if err := pg.RunSave(ctx, recA); err != nil {
+		t.Fatalf("首次 RunSave: %v", err)
+	}
+
+	findRun := func(list []plugin.RunRecord, id string) (plugin.RunRecord, bool) {
+		for _, rec := range list {
+			if rec.ID == id {
+				return rec, true
+			}
+		}
+		return plugin.RunRecord{}, false
+	}
+
+	gotAll, err := pg.RunList(ctx, 200)
+	if err != nil {
+		t.Fatalf("RunList: %v", err)
+	}
+	gotA, ok := findRun(gotAll, idA)
+	if !ok {
+		t.Fatalf("RunList 未读回 %s: %+v", idA, gotAll)
+	}
+	if gotA.Mode != recA.Mode || gotA.Source != recA.Source || gotA.CaptureID != recA.CaptureID ||
+		gotA.State != recA.State || gotA.Packets != recA.Packets || gotA.Alerts != recA.Alerts {
+		t.Errorf("读回字段不一致: got=%+v want=%+v", gotA, recA)
+	}
+	if !gotA.Finished.IsZero() {
+		t.Errorf("finished 零值应写 NULL 并读回零值，实际: %s", gotA.Finished)
+	}
+
+	// UPSERT：同 id 二次保存必须更新字段，而不是报唯一冲突。
+	finished := time.Date(2024, 7, 1, 12, 0, 0, 0, time.UTC)
+	recA.State = "done"
+	recA.Packets = 7
+	recA.Alerts = 2
+	recA.Finished = finished
+	if err := pg.RunSave(ctx, recA); err != nil {
+		t.Fatalf("二次 RunSave（UPSERT）: %v", err)
+	}
+
+	recB := plugin.RunRecord{
+		ID: idB, Mode: "live", Source: "replay:normal", CaptureID: "",
+		State: "error", Err: "boom", Packets: 1, Started: startedB,
+	}
+	if err := pg.RunSave(ctx, recB); err != nil {
+		t.Fatalf("RunSave B: %v", err)
+	}
+
+	gotAll, err = pg.RunList(ctx, 200)
+	if err != nil {
+		t.Fatalf("二次 RunList: %v", err)
+	}
+	gotA, ok = findRun(gotAll, idA)
+	if !ok {
+		t.Fatalf("UPSERT 后 RunList 未找到 %s", idA)
+	}
+	if gotA.State != "done" || gotA.Packets != 7 || gotA.Alerts != 2 || !gotA.Finished.Equal(finished) {
+		t.Errorf("UPSERT 未更新字段: %+v", gotA)
+	}
+	// 确认同 id 只有一条（UPSERT 而不是插入第二条）。
+	countA := 0
+	for _, rec := range gotAll {
+		if rec.ID == idA {
+			countA++
+		}
+	}
+	if countA != 1 {
+		t.Errorf("id=%s 在表中出现 %d 次，期望 1（UPSERT 覆盖）", idA, countA)
+	}
+
+	gotB, ok := findRun(gotAll, idB)
+	if !ok {
+		t.Fatalf("RunList 未读回 %s", idB)
+	}
+	if gotB.Err != "boom" || gotB.State != "error" {
+		t.Errorf("Run B 字段不一致: %+v", gotB)
+	}
+
+	// 按 started DESC：B（2100）必须在 A（2000）之前。
+	idxA, idxB := -1, -1
+	for i, rec := range gotAll {
+		switch rec.ID {
+		case idA:
+			idxA = i
+		case idB:
+			idxB = i
+		}
+	}
+	if idxA < 0 || idxB < 0 || idxB >= idxA {
+		t.Errorf("RunList 未按 started DESC 排序: idxA=%d idxB=%d list=%+v", idxA, idxB, gotAll)
 	}
 }

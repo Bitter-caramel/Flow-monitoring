@@ -1,5 +1,7 @@
 package plugin
 
+import "time"
+
 // Void 是 net/rpc 方法的空返回值（占位）。
 //
 // net/rpc 要求每个方法都有 reply 指针；无返回数据的方法统一用 Void。
@@ -45,4 +47,33 @@ type Host interface {
 	PacketList(captureID string, page Page) PacketPage
 	PacketCount(captureID string) int
 	PacketDelete(captureID string) error
+}
+
+// RunRecord 是一个分析任务（Run）的持久化视图。
+//
+// 它是 Run 在存储层的稳定形态：字段与 capture 模块的 runView 对应，
+// 用于服务重启后回填历史，避免"我分析过哪些证据包、结果如何"丢失。
+type RunRecord struct {
+	ID        string    `json:"id"`
+	Mode      string    `json:"mode"`
+	Source    string    `json:"source"`
+	CaptureID string    `json:"capture_id,omitempty"`
+	State     string    `json:"state"`
+	Packets   int       `json:"packets"`
+	Alerts    int       `json:"alerts"`
+	Err       string    `json:"err,omitempty"`
+	Started   time.Time `json:"started"`
+	Finished  time.Time `json:"finished"`
+}
+
+// RunStore 是 Host 的**可选**扩展：宿主支持 Run 持久化时，模块可经类型断言使用。
+//
+// ★ 不并入 Host 接口，避免所有假 Host 测试桩都要跟着改：
+//
+//	if rs, ok := host.(plugin.RunStore); ok {
+//	    _ = rs.RunSave(rec)
+//	}
+type RunStore interface {
+	RunSave(rec RunRecord) error
+	RunList(limit int) []RunRecord
 }

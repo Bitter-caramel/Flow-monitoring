@@ -1,9 +1,16 @@
 package plugin
 
 import (
+	"errors"
 	"net"
 	"net/rpc"
 )
+
+// errRunStoreUnsupported 表示宿主实现没有提供 Run 持久化能力。
+//
+// 模块侧会先做 RunStore 类型断言；正常情况下不会走到这里。保留该错误是为了
+// 让自定义宿主（或测试桩）在不支持时得到明确失败，而不是静默丢数据。
+var errRunStoreUnsupported = errors.New("plugin: host does not implement RunStore")
 
 // HostServiceName 宿主桥接服务在 net/rpc 中的注册名。
 const HostServiceName = "Host"
@@ -63,6 +70,11 @@ type PacketListArgs struct {
 type ServiceLookupResult struct {
 	Ref   ServiceRef
 	Found bool
+}
+
+// RunListArgs Run 历史查询参数。
+type RunListArgs struct {
+	Limit int
 }
 
 // —— 宿主侧：net/rpc 服务端 ——
@@ -156,6 +168,28 @@ func (s *HostRPCServer) PacketDelete(args *IDArg, _ *Void) error {
 	return s.Impl.PacketDelete(args.ID)
 }
 
+// RunSave 持久化一条 Run 记录（Host 的可选 RunStore 扩展）。
+func (s *HostRPCServer) RunSave(args *RunRecord, _ *Void) error {
+	rs, ok := s.Impl.(RunStore)
+	if !ok {
+		return errRunStoreUnsupported
+	}
+	return rs.RunSave(*args)
+}
+
+// RunList 查询 Run 历史（Host 的可选 RunStore 扩展）。
+func (s *HostRPCServer) RunList(args *RunListArgs, reply *[]RunRecord) error {
+	rs, ok := s.Impl.(RunStore)
+	if !ok {
+		// RunList 在可选接口里没有 error 返回值：明确返回空列表，
+		// 让模块按"没有历史"处理；RunSave 会返回错误让调用方感知。
+		*reply = nil
+		return errRunStoreUnsupported
+	}
+	*reply = rs.RunList(args.Limit)
+	return nil
+}
+
 // —— 模块侧：net/rpc 客户端 ——
 
 // DialHost 从模块进程回连宿主桥接服务。
@@ -175,7 +209,10 @@ type hostRPCClient struct {
 	client *rpc.Client
 }
 
-var _ Host = (*hostRPCClient)(nil)
+var (
+	_ Host     = (*hostRPCClient)(nil)
+	_ RunStore = (*hostRPCClient)(nil)
+)
 
 func (c *hostRPCClient) Config() ConfigSnapshot {
 	var r ConfigSnapshot
@@ -255,4 +292,16 @@ func (c *hostRPCClient) PacketCount(captureID string) int {
 
 func (c *hostRPCClient) PacketDelete(captureID string) error {
 	return c.client.Call(HostServiceName+".PacketDelete", &IDArg{ID: captureID}, &Void{})
+}
+
+// RunSave 远程持久化一条 Run 记录（Host 的可选 RunStore 扩展）。
+func (c *hostRPCClient) RunSave(rec RunRecord) error {
+	return c.client.Call(HostServiceName+".RunSave", &rec, &Void{})
+}
+
+// RunList 远程查询 Run 历史（Host 的可选 RunStore 扩展）。
+func (c *hostRPCClient) RunList(limit int) []RunRecord {
+	var r []RunRecord
+	_ = c.client.Call(HostServiceName+".RunList", &RunListArgs{Limit: limit}, &r)
+	return r
 }

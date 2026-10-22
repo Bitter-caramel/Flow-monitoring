@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"flow-monitoring/internal/kernel/storage"
+	"flow-monitoring/pkg/plugin"
 )
 
 // Postgres 基于 PostgreSQL 的存储实现。
@@ -311,4 +312,71 @@ func (s *packetStore) DeleteByCapture(ctx context.Context, captureID string) err
 		return fmt.Errorf("store: delete packets: %w", err)
 	}
 	return nil
+}
+
+// —— 18a：分析任务（Run）持久化 ——
+//
+// 不作为 storage.Storage 的必选方法：只有宿主 Bridge 需要（模块侧经可选
+// plugin.RunStore 调用），避免牵连所有存储替身与跨进程适配器。
+// 由 bridge.go 的 runStoreDB 做结构化断言。
+
+// RunSave 以 UPSERT 语义保存一条 Run 记录（同 id 二次保存更新字段）。
+//
+// finished 为零值时写 NULL：仍在运行 / 重启恢复的 Run 没有结束时间，
+// 不应写入零年份（否则前端会显示 0001-01-01）。
+func (p *Postgres) RunSave(ctx context.Context, rec plugin.RunRecord) error {
+	_, err := p.pool.Exec(ctx, `
+                INSERT INTO runs
+                        (id, mode, source, capture_id, state, packets, alerts, err, started, finished)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                ON CONFLICT (id) DO UPDATE SET
+                        mode       = EXCLUDED.mode,
+                        source     = EXCLUDED.source,
+                        capture_id = EXCLUDED.capture_id,
+                        state      = EXCLUDED.state,
+                        packets    = EXCLUDED.packets,
+                        alerts     = EXCLUDED.alerts,
+                        err        = EXCLUDED.err,
+                        started    = EXCLUDED.started,
+                        finished   = EXCLUDED.finished`,
+		rec.ID, rec.Mode, rec.Source, rec.CaptureID, rec.State,
+		rec.Packets, rec.Alerts, rec.Err, rec.Started, nullableTime(rec.Finished),
+	)
+	if err != nil {
+		return fmt.Errorf("store: save run: %w", err)
+	}
+	return nil
+}
+
+// RunList 按 started DESC 返回最近 limit 条 Run 记录。
+//
+// limit <= 0 时使用默认值 200（与 capture 模块回填上限保持一致）。
+func (p *Postgres) RunList(ctx context.Context, limit int) ([]plugin.RunRecord, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := p.pool.Query(ctx, `
+                SELECT id, mode, source, capture_id, state, packets, alerts, err, started, finished
+                FROM runs ORDER BY started DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: list runs: %w", err)
+	}
+	defer rows.Close()
+
+	var items []plugin.RunRecord
+	for rows.Next() {
+		var rec plugin.RunRecord
+		var finished *time.Time
+		if err := rows.Scan(
+			&rec.ID, &rec.Mode, &rec.Source, &rec.CaptureID, &rec.State,
+			&rec.Packets, &rec.Alerts, &rec.Err, &rec.Started, &finished,
+		); err != nil {
+			return nil, fmt.Errorf("store: scan run: %w", err)
+		}
+		if finished != nil {
+			rec.Finished = *finished
+		}
+		items = append(items, rec)
+	}
+	return items, rows.Err()
 }

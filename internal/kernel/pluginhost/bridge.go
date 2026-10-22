@@ -368,3 +368,52 @@ func (b *Bridge) PacketDelete(captureID string) error {
 	}
 	return db.Packets().DeleteByCapture(context.Background(), captureID)
 }
+
+// runStoreDB 是 storage.Storage 在存储实现侧的**可选** Run 持久化扩展。
+//
+// 定义在本包而不是 storage 包，是为了不在 Storage 接口上新增方法
+// （否则所有存储替身与跨进程适配器都得同步修改）。PG 实现通过结构化
+// 方法自动满足；测试替身可按需实现。
+type runStoreDB interface {
+	RunSave(ctx context.Context, rec plugin.RunRecord) error
+	RunList(ctx context.Context, limit int) ([]plugin.RunRecord, error)
+}
+
+// 编译期断言：Bridge 必须实现模块侧会用类型断言探测的可选 RunStore。
+var _ plugin.RunStore = (*Bridge)(nil)
+
+// RunSave 持久化一条 Run 记录（模块经 Host 可选扩展调用）。
+func (b *Bridge) RunSave(rec plugin.RunRecord) error {
+	db := b.snapshotDB()
+	if db == nil {
+		return plugin.ErrStorageUnavailable
+	}
+	rs, ok := db.(runStoreDB)
+	if !ok {
+		return plugin.ErrMissingDependency
+	}
+	return rs.RunSave(context.Background(), rec)
+}
+
+// RunList 查询 Run 历史（按 started DESC；limit<=0 时由存储实现决定默认值）。
+//
+// ★ 契约没有 error 返回值：存储不可用或查询失败时返回 nil，模块按
+// "没有历史"回填；RunSave 的失败会单独上报到日志，不会被静默忽略。
+func (b *Bridge) RunList(limit int) []plugin.RunRecord {
+	db := b.snapshotDB()
+	if db == nil {
+		return nil
+	}
+	rs, ok := db.(runStoreDB)
+	if !ok {
+		return nil
+	}
+	recs, err := rs.RunList(context.Background(), limit)
+	if err != nil {
+		if b.logger != nil {
+			b.logger.Warn("bridge: list runs failed", "err", err)
+		}
+		return nil
+	}
+	return recs
+}

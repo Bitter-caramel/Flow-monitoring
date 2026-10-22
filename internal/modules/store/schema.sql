@@ -37,3 +37,20 @@ CREATE INDEX IF NOT EXISTS idx_packets_capture_no ON packets (capture_id, no);
 -- 11-7b：按四元组双向查包（证据导出按连接取包）
 CREATE INDEX IF NOT EXISTS idx_packets_endpoints
     ON packets (src_ip, src_port, dst_ip, dst_port);
+
+-- 18a：分析任务（Run）持久化。服务重启后 /api/capture/runs 仍能看到历史。
+-- finished 允许 NULL：仍在运行 / 重启恢复的 Run 没有结束时间（不写零年份）。
+CREATE TABLE IF NOT EXISTS runs (
+    id         TEXT PRIMARY KEY,
+    mode       TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT '',
+    capture_id TEXT NOT NULL DEFAULT '',
+    state      TEXT NOT NULL,
+    packets    INT  NOT NULL DEFAULT 0,
+    alerts     INT  NOT NULL DEFAULT 0,
+    err        TEXT NOT NULL DEFAULT '',
+    started    TIMESTAMPTZ NOT NULL,
+    finished   TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_started ON runs (started DESC);

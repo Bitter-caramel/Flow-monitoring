@@ -165,6 +165,10 @@ func (m *captureModule) start(host plugin.Host, cfg plugin.ConfigSnapshot) error
 	m.ruleset = rs
 	m.mu.Unlock()
 
+	// 18a：从宿主存储回填 Run 历史（重启不丢"分析过哪些证据包、结果如何"）。
+	// 必须在创建 live Run 之前完成，避免历史与本次新 Run 的 ID/状态混淆。
+	m.restoreRuns()
+
 	// detect.replay_file 为空 ⇒ 不自动开播，等待 HTTP 下发的静态分析任务。
 	if settings.ReplayFile == "" {
 		m.host.Log("info", "capture: detect.replay_file 为空，等待静态分析任务")

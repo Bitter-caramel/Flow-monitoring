@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"flow-monitoring/internal/hotpath"
+	"flow-monitoring/pkg/plugin"
 )
 
 // Run 状态与容量默认值。
@@ -30,6 +31,12 @@ const (
 
 	// stopRunWait 是 DELETE 等待 Run 协程退出的上限，避免慢数据源把 HTTP 拖死。
 	stopRunWait = 5 * time.Second
+
+	// restoreRunLimit 是 start() 从存储回填的历史 Run 上限。
+	restoreRunLimit = 200
+
+	// zombieRunErr 是重启后把上次进程遗留的 running Run 改判为 error 的原因。
+	zombieRunErr = "进程异常退出（重启恢复）"
 )
 
 // Run 创建/停止相关的哨兵错误。
@@ -99,6 +106,100 @@ func runViewOf(r *captureRun) runView {
 	}
 }
 
+// runRecordOf 把运行期 Run 转成持久化视图；调用方必须持有 m.mu。
+func runRecordOf(r *captureRun) plugin.RunRecord {
+	return plugin.RunRecord{
+		ID:        r.ID,
+		Mode:      r.Mode,
+		Source:    r.Source,
+		CaptureID: r.captureID,
+		State:     r.State,
+		Packets:   r.Packets,
+		Alerts:    r.Alerts,
+		Err:       r.Err,
+		Started:   r.Started,
+		Finished:  r.Finished,
+	}
+}
+
+// saveRun 把 Run 快照写入宿主存储（可选扩展）；失败只记日志，不影响任务本身。
+func (m *captureModule) saveRun(rec plugin.RunRecord) {
+	if m.host == nil {
+		return
+	}
+	rs, ok := m.host.(plugin.RunStore)
+	if !ok {
+		// 宿主不支持 Run 持久化（或测试桩没实现）⇒ 静默跳过，不能让 Run 失败。
+		return
+	}
+	if err := rs.RunSave(rec); err != nil {
+		m.logf("warn", "capture: 持久化 Run %s 失败: %v", rec.ID, err)
+	}
+}
+
+// restoreRuns 从宿主存储回填内存 runs 表（服务重启后恢复历史）。
+//
+// ★ 回填的 running 记录是上次进程被杀的"僵尸"：改为 error 并写明原因，
+//
+//	绝不留"永远在跑"的假象。
+//
+// ★ 回填的记录不创建 goroutine、不重建 hotpath —— 它们已经结束。
+func (m *captureModule) restoreRuns() {
+	if m.host == nil {
+		return
+	}
+	rs, ok := m.host.(plugin.RunStore)
+	if !ok {
+		return
+	}
+	recs := rs.RunList(restoreRunLimit)
+	if len(recs) == 0 {
+		return
+	}
+
+	m.mu.Lock()
+	m.ensureRunsLocked()
+	var healed []plugin.RunRecord
+	restored := 0
+	for _, rec := range recs {
+		if rec.ID == "" {
+			continue
+		}
+		if _, exists := m.runs[rec.ID]; exists {
+			continue
+		}
+		run := &captureRun{
+			ID:        rec.ID,
+			Mode:      rec.Mode,
+			Source:    rec.Source,
+			State:     rec.State,
+			Packets:   rec.Packets,
+			Alerts:    rec.Alerts,
+			Err:       rec.Err,
+			Started:   rec.Started,
+			Finished:  rec.Finished,
+			captureID: rec.CaptureID,
+		}
+		if run.State == runStateRunning {
+			run.State = runStateError
+			run.Err = zombieRunErr
+			healed = append(healed, runRecordOf(run))
+		}
+		m.runs[run.ID] = run
+		restored++
+	}
+	m.evictFinishedLocked()
+	m.mu.Unlock()
+
+	// 把"僵尸 running → error"的修正写回存储，避免每次重启都重复误判。
+	for _, rec := range healed {
+		m.saveRun(rec)
+	}
+	if restored > 0 {
+		m.logf("info", "capture: 从存储恢复 %d 条 Run 历史", restored)
+	}
+}
+
 // ensureRunsLocked 初始化 runs 表与 maxRuns 默认值；调用方必须持有 m.mu。
 func (m *captureModule) ensureRunsLocked() {
 	if m.runs == nil {
@@ -115,16 +216,18 @@ func (m *captureModule) ensureRunsLocked() {
 // ★ hotpath 在这里按 Run 新建（共享只读 RuleSet），保证状态隔离。
 func (m *captureModule) addRun(mode, sourceName, captureID string, src Source) (*captureRun, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	m.ensureRunsLocked()
 	if !m.started || m.stopped {
+		m.mu.Unlock()
 		return nil, errNotRunning
 	}
 	if m.ruleset == nil {
+		m.mu.Unlock()
 		return nil, errNoRules
 	}
 	if m.countRunningLocked() >= m.maxRuns {
+		m.mu.Unlock()
 		return nil, errTooManyRuns
 	}
 
@@ -143,7 +246,14 @@ func (m *captureModule) addRun(mode, sourceName, captureID string, src Source) (
 	}
 	m.runs[run.ID] = run
 	m.evictFinishedLocked()
+	rec := runRecordOf(run)
+	// ★ wg.Add 必须在持锁期间完成：否则 stop() 可能先进入 wg.Wait，
+	// 造成新 Run 的协程在 Wait 之后才启动而漏等。
 	m.wg.Add(1)
+	m.mu.Unlock()
+
+	// 持久化失败只记日志，不影响 Run 运行。
+	m.saveRun(rec)
 	go m.executeRun(ctx, run)
 	return run, nil
 }
@@ -259,7 +369,11 @@ func (m *captureModule) finishRun(run *captureRun, state, errMsg string, packets
 	if errMsg != "" {
 		run.Err = errMsg
 	}
+	rec := runRecordOf(run)
 	m.mu.Unlock()
+
+	// 落定后再次持久化：更新 state / packets / alerts / finished。
+	m.saveRun(rec)
 
 	m.logf("info", "capture: replay finished, packets=%d alerts=%d publish_errs=%d",
 		packets, alerts, publishErrs)
