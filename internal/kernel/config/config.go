@@ -27,11 +27,21 @@ type Config struct {
 	Database    DBConfig       `json:"database"`
 	Logging     LogConfig      `json:"logging"`
 	Detect      DetectConfig   `json:"detect"`
+	Alert       AlertConfig    `json:"alert"`
 	DataDir     string         `json:"data_dir"`        // 原始抓包文件目录
 	PluginDir   string         `json:"plugin_dir"`      // 模块进程二进制目录
 	ManifestDir string         `json:"manifest_dir"`    // 用户扩展模块清单目录（L3）
 	StaticDir   string         `json:"static_dir"`      // 前端构建产物目录（空=不托管）
 	Extra       map[string]any `json:"extra,omitempty"` // 模块自定义配置
+}
+
+// AlertConfig 告警归档配置。
+//
+// ★ SinkPath 同时被 alert 模块（落盘 data/alerts.jsonl）和宿主 alerting
+//
+//	（启动回填环形缓冲）使用，两边必须指向同一文件（任务 18b）。
+type AlertConfig struct {
+	SinkPath string `json:"sink_path"` // 默认 "data/alerts.jsonl"
 }
 
 // DetectConfig 热路径检测配置。
@@ -119,6 +129,7 @@ func Default() *Config {
 			ReplayFile:  "",
 			AlertBuffer: 1000,
 		},
+		Alert:       AlertConfig{SinkPath: "data/alerts.jsonl"},
 		DataDir:     "data",
 		PluginDir:   "bin/plugins",
 		ManifestDir: "registry/backend-modules",
@@ -191,6 +202,10 @@ func applyEnv(c *Config) *Config {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Detect.AlertBuffer = n
 		}
+	}
+	// 告警归档路径：宿主回填与 alert 模块落盘共用（显式空串 = 不落盘/不回填）。
+	if v, ok := os.LookupEnv("FLOW_ALERT_SINK_PATH"); ok {
+		c.Alert.SinkPath = v
 	}
 	switch os.Getenv("FLOW_DEBUG") {
 	case "1", "true", "TRUE", "True":

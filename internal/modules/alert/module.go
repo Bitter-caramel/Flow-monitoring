@@ -65,9 +65,15 @@ type featureEvent struct {
 }
 
 // toAlertEvent 把扁平检测特征转成告警落盘结构。
+//
+// ★ RunID / Mode 必须一并透传：宿主回填 /api/alerts 后按工作台/任务过滤
+//
+//	依赖这两个字段（任务 18b）；漏掉会让重启后的历史告警过滤失效。
 func (f featureEvent) toAlertEvent() Event {
 	return Event{
 		CaptureID: f.CaptureID,
+		RunID:     f.RunID,
+		Mode:      f.Mode,
 		Alert: detect.Alert{
 			RuleID:   f.RuleID,
 			Name:     f.Name,
@@ -230,11 +236,20 @@ func decodeEvent(payload any) (Event, bool) {
 
 	var nested struct {
 		CaptureID string       `json:"capture_id"`
+		RunID     string       `json:"run_id"`
+		Mode      string       `json:"mode"`
 		Alert     featureEvent `json:"alert"`
 	}
 	if err := json.Unmarshal(raw, &nested); err == nil && nested.Alert.RuleID != "" {
 		ev := nested.Alert.toAlertEvent()
 		ev.CaptureID = nested.CaptureID
+		// 兼容 run_id/mode 写在 alert 内层或外层两种形状（外层优先）。
+		if nested.RunID != "" {
+			ev.RunID = nested.RunID
+		}
+		if nested.Mode != "" {
+			ev.Mode = nested.Mode
+		}
 		return ev, true
 	}
 

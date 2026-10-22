@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -271,5 +272,180 @@ func TestServiceStatsByModeAndRun(t *testing.T) {
 	}
 	if st.ByRun["run-1"] != 2 || st.ByRun["run-2"] != 1 || st.ByRun["run-3"] != 1 {
 		t.Errorf("ByRun = %v, want run-1=2 run-2=1 run-3=1", st.ByRun)
+	}
+}
+
+// task18bRestoreSnakeLine 造一行归档：alert 用宿主 DTO 的 snake_case 键名。
+func task18bRestoreSnakeLine(captureID, runID, mode, ruleID, ts string) string {
+	return `{"capture_id":"` + captureID + `","run_id":"` + runID + `","mode":"` + mode + `","alert":{` +
+		`"rule_id":"` + ruleID + `","name":"n","severity":"high","weight":1,` +
+		`"time":"` + ts + `","src_ip":"1.1.1.1","src_port":1,"dst_ip":"2.2.2.2","dst_port":2,` +
+		`"proto":"TCP","stream_id":1,"buffer":"payload","offset":0,"snippet":"x"}}`
+}
+
+// task18bRestorePascalLine 造一行归档：alert 用 detect.Alert 的 PascalCase 键名
+// （data/alerts.jsonl 的真实形状）。
+func task18bRestorePascalLine(captureID, runID, mode, ruleID, ts string) string {
+	return `{"capture_id":"` + captureID + `","run_id":"` + runID + `","mode":"` + mode + `","alert":{` +
+		`"RuleID":"` + ruleID + `","Name":"n","Severity":"high","Weight":1,` +
+		`"Time":"` + ts + `","SrcIP":"1.1.1.1","SrcPort":1,"DstIP":"2.2.2.2","DstPort":2,` +
+		`"Proto":"TCP","StreamID":1,"Buffer":"payload","Offset":0,"Snippet":"x"}}`
+}
+
+// task18bWriteRestoreFile 把若干行写进临时 JSONL（每行以 \n 结尾）。
+func task18bWriteRestoreFile(t *testing.T, lines []string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "alerts.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write restore file: %v", err)
+	}
+	return path
+}
+
+// TestRestoreFromFile 3 条合法（含 PascalCase）+ 1 条坏行 ⇒ 回填 3 条，
+// id 1/2/3、按 time 升序、RunID/Mode/CaptureID 保留。
+func TestTask18bRestoreFromFile(t *testing.T) {
+	path := task18bWriteRestoreFile(t, []string{
+		task18bRestoreSnakeLine("cap-3", "run-3", ModeLive, "r3", "2024-01-01T00:00:03Z"),
+		"this-is-not-json",
+		task18bRestorePascalLine("cap-1", "run-1", ModeStatic, "r1", "2024-01-01T00:00:01Z"),
+		task18bRestoreSnakeLine("cap-2", "run-2", ModeLive, "r2", "2024-01-01T00:00:02Z"),
+	})
+
+	svc := New(Config{Capacity: 100})
+	n, err := svc.RestoreFromFile(path)
+	if err != nil {
+		t.Fatalf("RestoreFromFile: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("restored = %d, want 3（坏行应跳过）", n)
+	}
+
+	p := svc.Query(1, MaxPageSize, 0, Filter{})
+	if p.Total != 3 || len(p.Items) != 3 {
+		t.Fatalf("total=%d items=%d, want 3/3", p.Total, len(p.Items))
+	}
+	// 按 time 升序插入 ⇒ r1/r2/r3，id 1/2/3。
+	wantRule := []string{"r1", "r2", "r3"}
+	wantCap := []string{"cap-1", "cap-2", "cap-3"}
+	wantRun := []string{"run-1", "run-2", "run-3"}
+	for i, a := range p.Items {
+		if a.ID != uint64(i+1) {
+			t.Errorf("items[%d].ID = %d, want %d", i, a.ID, i+1)
+		}
+		if a.RuleID != wantRule[i] {
+			t.Errorf("items[%d].RuleID = %q, want %q", i, a.RuleID, wantRule[i])
+		}
+		if a.CaptureID != wantCap[i] || a.RunID != wantRun[i] {
+			t.Errorf("items[%d] 归属 = %q/%q, want %q/%q",
+				i, a.CaptureID, a.RunID, wantCap[i], wantRun[i])
+		}
+	}
+	if p.Items[0].Mode != ModeStatic {
+		t.Errorf("items[0].Mode = %q, want %q（PascalCase 行必须解出 mode）", p.Items[0].Mode, ModeStatic)
+	}
+	// PascalCase 的 alert 字段必须被解出来（不能被 snake_case tag 漏掉）。
+	if p.Items[0].Name != "n" || p.Items[0].Severity != "high" || p.Items[0].SrcIP != "1.1.1.1" {
+		t.Errorf("items[0] PascalCase 字段解码错误: %+v", p.Items[0])
+	}
+
+	st := svc.Stats()
+	if st.Restored != 3 {
+		t.Errorf("Stats().Restored = %d, want 3", st.Restored)
+	}
+	if st.Received != 0 {
+		t.Errorf("Stats().Received = %d, want 0（回填不计入运行期接收）", st.Received)
+	}
+	if st.AlertsTotal != 3 {
+		t.Errorf("Stats().AlertsTotal = %d, want 3", st.AlertsTotal)
+	}
+
+	// 回填后 nextID 必须接上运行期新增的 id（4）。
+	rec := svc.ring.add(Alert{RuleID: "live", Time: "2024-01-01T00:00:04Z"})
+	if rec.ID != 4 {
+		t.Errorf("回填后新增告警 ID = %d, want 4（nextID 必须接上）", rec.ID)
+	}
+}
+
+// TestRestoreFromFileKeepsLastN 5 行、容量 3 ⇒ 只回填最后 3 条（r3/r4/r5）。
+func TestTask18bRestoreKeepsLastN(t *testing.T) {
+	lines := make([]string, 0, 5)
+	for i := 1; i <= 5; i++ {
+		lines = append(lines, task18bRestoreSnakeLine(
+			fmt.Sprintf("cap-%d", i), fmt.Sprintf("run-%d", i), ModeLive,
+			fmt.Sprintf("r%d", i), fmt.Sprintf("2024-01-01T00:00:0%dZ", i)))
+	}
+	path := task18bWriteRestoreFile(t, lines)
+
+	svc := New(Config{Capacity: 3})
+	n, err := svc.RestoreFromFile(path)
+	if err != nil {
+		t.Fatalf("RestoreFromFile: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("restored = %d, want 3（容量截断）", n)
+	}
+	p := svc.Query(1, MaxPageSize, 0, Filter{})
+	if p.Total != 3 {
+		t.Fatalf("total = %d, want 3", p.Total)
+	}
+	want := []string{"r3", "r4", "r5"}
+	for i, a := range p.Items {
+		if a.RuleID != want[i] {
+			t.Errorf("items[%d].RuleID = %q, want %q（只保留最后 3 条）", i, a.RuleID, want[i])
+		}
+		if a.ID != uint64(i+1) {
+			t.Errorf("items[%d].ID = %d, want %d", i, a.ID, i+1)
+		}
+	}
+}
+
+// TestRestoreFromFileMissing 文件不存在 ⇒ (0, nil)（首次运行没有归档）。
+func TestTask18bRestoreMissingFile(t *testing.T) {
+	svc := New(Config{Capacity: 10})
+	n, err := svc.RestoreFromFile(filepath.Join(t.TempDir(), "does-not-exist.jsonl"))
+	if err != nil {
+		t.Fatalf("RestoreFromFile 缺失文件不应报错: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("restored = %d, want 0", n)
+	}
+	if svc.Stats().AlertsTotal != 0 {
+		t.Fatalf("AlertsTotal = %d, want 0", svc.Stats().AlertsTotal)
+	}
+}
+
+// TestRestoreFromFileSkipsBadAlert alert 字段不是对象的坏行被跳过，不影响好行。
+func TestTask18bRestoreSkipsBadAlert(t *testing.T) {
+	path := task18bWriteRestoreFile(t, []string{
+		`{"capture_id":"c1","run_id":"r1","mode":"live","alert":"not-an-object"}`,
+		task18bRestoreSnakeLine("c2", "r2", ModeLive, "ok", "2024-01-01T00:00:01Z"),
+	})
+	svc := New(Config{Capacity: 10})
+	n, err := svc.RestoreFromFile(path)
+	if err != nil {
+		t.Fatalf("RestoreFromFile: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("restored = %d, want 1", n)
+	}
+	p := svc.Query(1, MaxPageSize, 0, Filter{})
+	if p.Total != 1 || p.Items[0].RuleID != "ok" {
+		t.Fatalf("query = %+v, want 1 条 RuleID=ok", p)
+	}
+}
+
+// TestNewRestoresFromPath New(Config{RestorePath}) 在构造时自动回填（启动接线）。
+func TestTask18bNewRestoresFromPath(t *testing.T) {
+	path := task18bWriteRestoreFile(t, []string{
+		task18bRestoreSnakeLine("c1", "r1", ModeLive, "r1", "2024-01-01T00:00:01Z"),
+		task18bRestoreSnakeLine("c2", "r2", ModeStatic, "r2", "2024-01-01T00:00:02Z"),
+	})
+	svc := New(Config{Capacity: 10, RestorePath: path})
+	if st := svc.Stats(); st.Restored != 2 || st.AlertsTotal != 2 {
+		t.Fatalf("stats = %+v, want restored=2 alerts_total=2", st)
+	}
+	if p := svc.Query(1, MaxPageSize, 0, Filter{RunID: "r2"}); p.Total != 1 || p.Items[0].RuleID != "r2" {
+		t.Fatalf("按 run_id 过滤失败: %+v", p)
 	}
 }

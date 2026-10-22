@@ -1,11 +1,17 @@
 package alerting
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"sort"
 	"sync"
+	"time"
 
 	"flow-monitoring/internal/kernel/eventbus"
 )
@@ -25,6 +31,9 @@ type Config struct {
 	Logger *slog.Logger
 	// PushBuffer 是 OnAlert 派发通道的缓冲容量（<=0 用 DefaultPushBuffer）。
 	PushBuffer int
+	// RestorePath 是启动时回填告警的 JSONL 归档路径（空 = 不回填）。
+	// ★ 与 alert 模块的 alert.sink_path 指向同一文件；不存在时静默跳过。
+	RestorePath string
 }
 
 // Stats 是 /api/alerts/stats 的响应体。
@@ -46,6 +55,9 @@ type Stats struct {
 	// 始终非 nil（空缓冲为 {}），避免 JSON 序列化成 null。
 	ByMode map[string]int `json:"by_mode"`
 	ByRun  map[string]int `json:"by_run"`
+
+	// Restored 是启动时从 JSONL 归档回填的告警条数（不计入 Received）。
+	Restored int `json:"restored"`
 }
 
 // Service 只订阅 detect.feature 事件并缓存告警，不加载规则、不跑热路径。
@@ -64,6 +76,8 @@ type Service struct {
 	received  uint64
 	decodeErr uint64
 	lastError string
+	// restored 是启动时从 JSONL 归档回填的条数（受 mu 保护）。
+	restored int
 	// onAlert 是分配 id 并写入环形缓冲后回调的钩子（可为 nil）。
 	onAlert func(Alert)
 	// pushCh 是有界派发通道；只由 consume goroutine 投递、dispatch goroutine 消费。
@@ -73,6 +87,10 @@ type Service struct {
 }
 
 // New 创建 alerting 服务（只装配环形缓冲与日志器，不启动订阅）。
+//
+// ★ RestorePath 非空时在此处同步回填历史告警（任务 18b）：回填失败只记日志、
+//
+//	绝不阻断启动；文件不存在视为首次运行，静默跳过。
 func New(cfg Config) *Service {
 	logger := cfg.Logger
 	if logger == nil {
@@ -82,10 +100,192 @@ func New(cfg Config) *Service {
 	if pushBuf <= 0 {
 		pushBuf = DefaultPushBuffer
 	}
-	return &Service{
+	s := &Service{
 		ring:    newRing(cfg.Capacity),
 		logger:  logger,
 		pushBuf: pushBuf,
+	}
+	if cfg.RestorePath != "" {
+		n, err := s.RestoreFromFile(cfg.RestorePath)
+		switch {
+		case err != nil:
+			logger.Warn("alerting: 回填告警归档失败（忽略，继续启动）",
+				"path", cfg.RestorePath, "err", err)
+		case n > 0:
+			logger.Info("alerting: 已从告警归档回填",
+				"path", cfg.RestorePath, "restored", n)
+		}
+	}
+	return s
+}
+
+// RestoreFromFile 从 JSONL 归档回填环形缓冲（只保留最后 len(capacity) 条）。
+//
+// 语义：
+//   - 文件不存在 ⇒ (0, nil)，不报错（首次运行没有归档）；
+//   - 逐行读取，用滑动窗口只保留最后 capacity 条，不一次性把整个文件读进内存；
+//   - 每行二次解析：先把 alert 解成 json.RawMessage，再解成宿主 DTO（不 import detect）；
+//   - 任何解析失败都只记日志并跳过该行，不影响启动；
+//   - 回填后按 time 升序写入，id 由 ring.add 从 1 连续分配（与运行期一致）；
+//   - 不发 OnAlert 回调、不计入 Received；回填条数记入 Stats().Restored。
+func (s *Service) RestoreFromFile(path string) (restored int, err error) {
+	if s == nil || path == "" {
+		return 0, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer f.Close()
+
+	capacity := s.ring.capacity()
+	rows := make([]Alert, 0, capacity)
+
+	sc := bufio.NewScanner(f)
+	// 单行可能较长（snippet 等），放宽扫描缓冲上限。
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var row struct {
+			CaptureID string          `json:"capture_id"`
+			RunID     string          `json:"run_id"`
+			Mode      string          `json:"mode"`
+			Alert     json.RawMessage `json:"alert"`
+		}
+		if uerr := json.Unmarshal(line, &row); uerr != nil {
+			s.warnRestoreSkip(path, uerr)
+			continue
+		}
+		a, ok := decodeRestoredAlert(row.Alert)
+		if !ok {
+			s.warnRestoreSkip(path, fmt.Errorf("alert 字段不是合法对象"))
+			continue
+		}
+		a.RunID = row.RunID
+		a.Mode = row.Mode
+		a.CaptureID = row.CaptureID
+
+		// 滑动窗口：只保留最后 capacity 条。
+		if len(rows) >= capacity {
+			copy(rows, rows[1:])
+			rows = rows[:capacity-1]
+		}
+		rows = append(rows, a)
+	}
+	if serr := sc.Err(); serr != nil {
+		return 0, fmt.Errorf("alerting: 读取归档 %s: %w", path, serr)
+	}
+
+	// 按 time 升序回填（同时间保持文件顺序，稳定排序）。
+	sort.SliceStable(rows, func(i, j int) bool {
+		return restoreTimeLess(rows[i].Time, rows[j].Time)
+	})
+	for _, a := range rows {
+		s.ring.add(a)
+		restored++
+	}
+	if restored > 0 {
+		s.mu.Lock()
+		s.restored += restored
+		s.mu.Unlock()
+	}
+	return restored, nil
+}
+
+// restoreAlertPascal 与 detect.Alert 的 JSON 形状（Go 字段名，PascalCase）对齐。
+//
+// ★ 内核不能 import detect，因此这里用一份纯数据镜像做二次解析；它只服务回填，
+//
+//	不参与任何对外 API（对外仍是 dto.go 里的 Alert）。
+type restoreAlertPascal struct {
+	RuleID   string
+	Name     string
+	Severity string
+	Weight   int
+	Time     string
+	SrcIP    string
+	SrcPort  uint16
+	DstIP    string
+	DstPort  uint16
+	Proto    string
+	StreamID int
+	PktNo    int
+	Buffer   string
+	Offset   int
+	Snippet  string
+}
+
+func (p restoreAlertPascal) toAlert() Alert {
+	return Alert{
+		RuleID:   p.RuleID,
+		Name:     p.Name,
+		Severity: p.Severity,
+		Weight:   p.Weight,
+		Time:     p.Time,
+		SrcIP:    p.SrcIP,
+		SrcPort:  p.SrcPort,
+		DstIP:    p.DstIP,
+		DstPort:  p.DstPort,
+		Proto:    p.Proto,
+		StreamID: p.StreamID,
+		PktNo:    p.PktNo,
+		Buffer:   p.Buffer,
+		Offset:   p.Offset,
+		Snippet:  p.Snippet,
+	}
+}
+
+// decodeRestoredAlert 兼容两种 alert 键名形状：
+//   - 宿主 DTO 的 snake_case（json.Marshal(Alert) 的产物，含手工/测试输入）；
+//   - detect.Alert 的 PascalCase（data/alerts.jsonl 的真实形状：Alert 无 json tag）。
+//
+// ★ 直接 import detect 会破坏内核纯净性（purity_test.go 会红），所以两种形状
+//
+//	各解一次再择优；RuleID 非空者优先。
+func decodeRestoredAlert(raw json.RawMessage) (Alert, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return Alert{}, false
+	}
+
+	var snake Alert
+	snakeErr := json.Unmarshal(raw, &snake)
+	if snakeErr == nil && snake.RuleID != "" {
+		return snake, true
+	}
+
+	var pascal restoreAlertPascal
+	pascalErr := json.Unmarshal(raw, &pascal)
+	if pascalErr == nil && pascal.RuleID != "" {
+		return pascal.toAlert(), true
+	}
+
+	if snakeErr != nil && pascalErr != nil {
+		return Alert{}, false
+	}
+	// 合法 JSON 但没有可识别的 RuleID：保留 snake 解出的字段（与旧行为一致）。
+	return snake, true
+}
+
+// restoreTimeLess 按 RFC3339 时间比较；解析失败时退回字符串比较。
+func restoreTimeLess(a, b string) bool {
+	ta, ea := time.Parse(time.RFC3339, a)
+	tb, eb := time.Parse(time.RFC3339, b)
+	if ea == nil && eb == nil {
+		return ta.Before(tb)
+	}
+	return a < b
+}
+
+// warnRestoreSkip 记录被跳过的坏行（不影响启动）。
+func (s *Service) warnRestoreSkip(path string, err error) {
+	if s.logger != nil {
+		s.logger.Warn("alerting: 跳过无法解析的回填行", "path", path, "err", err)
 	}
 }
 
@@ -179,6 +379,7 @@ func (s *Service) Stats() Stats {
 	decodeErr := s.decodeErr
 	lastError := s.lastError
 	pushDropped := s.pushDropped
+	restored := s.restored
 	s.mu.Unlock()
 
 	byMode, byRun := s.ring.groupCounts()
@@ -194,6 +395,7 @@ func (s *Service) Stats() Stats {
 		LastError:    lastError,
 		ByMode:       byMode,
 		ByRun:        byRun,
+		Restored:     restored,
 	}
 }
 

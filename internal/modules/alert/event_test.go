@@ -96,3 +96,51 @@ func TestEventJSONRoundTrip(t *testing.T) {
 		t.Fatalf("Snippet 期望 %q, 实际 %q", a.Snippet, b.Snippet)
 	}
 }
+
+// TestEventCarriesRunIDMode 回填链路要求 Event 保留 run_id / mode：
+// 从 capture 发布的扁平 detect.feature 载荷经 decodeEvent 后必须带上它们。
+func TestTask18bEventCarriesRunIDMode(t *testing.T) {
+	payload := []byte(`{"capture_id":"capture.pcapng","run_id":"run-2024","mode":"live",` +
+		`"rule_id":"r1","name":"命中","severity":"high","weight":7,` +
+		`"time":"2024-01-02T03:04:05Z","src_ip":"10.0.0.5","src_port":50000,` +
+		`"dst_ip":"93.184.216.34","dst_port":80,"proto":"HTTP","stream_id":3}`)
+
+	ev, ok := decodeEvent(payload)
+	if !ok {
+		t.Fatal("decodeEvent 失败")
+	}
+	if ev.RunID != "run-2024" {
+		t.Errorf("Event.RunID = %q, want run-2024", ev.RunID)
+	}
+	if ev.Mode != "live" {
+		t.Errorf("Event.Mode = %q, want live", ev.Mode)
+	}
+	if ev.CaptureID != "capture.pcapng" {
+		t.Errorf("Event.CaptureID = %q, want capture.pcapng", ev.CaptureID)
+	}
+	if ev.Alert.RuleID != "r1" {
+		t.Errorf("Event.Alert.RuleID = %q, want r1", ev.Alert.RuleID)
+	}
+}
+
+// TestEventJSONRoundTripRunIDMode 断言归档 JSON 往返保留 run_id / mode（omitempty 不丢值）。
+func TestTask18bEventJSONRoundTripRunIDMode(t *testing.T) {
+	src := Event{
+		CaptureID: "cap",
+		RunID:     "run-1",
+		Mode:      "static",
+		Alert:     detect.Alert{RuleID: "r1", Time: time.Unix(1700000000, 0).UTC()},
+	}
+	raw, err := json.Marshal(src)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var dst Event
+	if err := json.Unmarshal(raw, &dst); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if dst.RunID != src.RunID || dst.Mode != src.Mode {
+		t.Fatalf("run_id/mode 往返丢失: got %q/%q, want %q/%q",
+			dst.RunID, dst.Mode, src.RunID, src.Mode)
+	}
+}

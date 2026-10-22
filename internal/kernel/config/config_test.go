@@ -125,3 +125,37 @@ func TestLoad_EnvOverride(t *testing.T) {
 		t.Errorf("Level env not applied, got %q", c.Logging.Level)
 	}
 }
+
+// TestDefault_Alert 告警归档默认指向 data/alerts.jsonl（宿主回填与模块落盘共用）。
+func TestTask18bDefaultAlert(t *testing.T) {
+	c := Default()
+	if c.Alert.SinkPath != "data/alerts.jsonl" {
+		t.Errorf("Alert.SinkPath default = %q, want data/alerts.jsonl", c.Alert.SinkPath)
+	}
+}
+
+// TestLoad_AlertSinkPath 验证 alert.sink_path 配置文件与 FLOW_ALERT_SINK_PATH 覆盖。
+func TestTask18bLoadAlertSinkPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	content := `{"alert":{"sink_path":"/tmp/custom-alerts.jsonl"}}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Alert.SinkPath != "/tmp/custom-alerts.jsonl" {
+		t.Errorf("Alert.SinkPath = %q, want /tmp/custom-alerts.jsonl", c.Alert.SinkPath)
+	}
+
+	t.Setenv("FLOW_ALERT_SINK_PATH", "/tmp/env-alerts.jsonl")
+	c, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load with env: %v", err)
+	}
+	if c.Alert.SinkPath != "/tmp/env-alerts.jsonl" {
+		t.Errorf("Alert.SinkPath env override = %q, want /tmp/env-alerts.jsonl", c.Alert.SinkPath)
+	}
+}
