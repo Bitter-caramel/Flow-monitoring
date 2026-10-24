@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"flow-monitoring/internal/kernel/logging"
+	"flow-monitoring/internal/kernel/modulestatus"
 	"flow-monitoring/internal/kernel/registry"
 )
 
@@ -46,6 +47,25 @@ var (
 	ErrInProcessModule = errors.New("modulecontrol: 内嵌模块不可启停")
 )
 
+// StatusProvider 是模块运行状态的可选来源（module.status 订阅结果的快照）。
+//
+// ★ 用最小接口而非具体 *modulestatus.Store，便于测试注入，也避免控制面
+// 绑死在某一种存储实现上。nil = 不展示状态（status 为空对象）。
+type StatusProvider interface {
+	Get(id string) (modulestatus.Status, bool)
+}
+
+// ModuleStatus 是模块视图里的运行状态（无数据时整个对象序列化为 {}）。
+type ModuleStatus struct {
+	// ★ 全部字段 omitempty：未收到状态时 ModuleStatus 零值序列化为 {}，
+	// 符合"无数据时为空对象、不要报错"的约定。
+	Healthy    bool              `json:"healthy,omitempty"`
+	Message    string            `json:"message,omitempty"`
+	Metrics    map[string]string `json:"metrics,omitempty"`
+	At         string            `json:"at,omitempty"`
+	ReceivedAt string            `json:"received_at,omitempty"`
+}
+
 // Options 构造选项。
 type Options struct {
 	ManifestDir string          // 清单目录（空 = DefaultManifestDir）
@@ -53,6 +73,8 @@ type Options struct {
 	Runtime     RuntimeBackend  // ★ 可选：nil = 只改清单（12-2 行为）
 	StopTimeout time.Duration   // ★ 可选：单模块停止超时（默认 DefaultStopTimeout=10s）
 	AuditSink   AuditSink       // ★ 可选：nil = 不写审计
+	// Statuses 可选：模块运行状态来源（module.status 订阅结果）。nil = 不展示状态。
+	Statuses StatusProvider
 	// BinaryChecker 判定"插件目录里是否存在该模块的可执行文件"。
 	// binary 是清单里的 Binary（registry 已兜底为模块 ID），实现方负责按
 	// pluginhost 的拼路径规则（PluginDir + binary + Windows 后缀）判存在性。
@@ -79,6 +101,8 @@ type ModuleView struct {
 	// false 只代表"没找到二进制"，不阻止清单 enabled=true；界面必须如实标注。
 	HasBinary bool   `json:"has_binary"`
 	State     string `json:"state"` // ★ 本步恒为 StateUnknown（12-3 才接真实运行态）
+	// Status 是模块自报的运行状态（module.status 主题）；无数据时序列化为 {}。
+	Status ModuleStatus `json:"status"`
 }
 
 // Edge 一条依赖边：From 依赖 To（⇒ To 必须先启、后停）。
@@ -126,6 +150,8 @@ type Service struct {
 	runtime     RuntimeBackend // ★ 可选：nil = 只改清单（12-2 行为）
 	stopTimeout time.Duration  // ★ 单模块停止超时；New 时兜底为 DefaultStopTimeout
 	audit       AuditSink      // ★ 可选：nil = 不写审计
+	// statuses 是模块运行状态来源；nil = 不展示状态（status 为空对象）。
+	statuses StatusProvider
 	// binaryChecker 判定插件二进制是否存在；nil = 不可判定（Impact.HasBinary 恒 false）。
 	binaryChecker func(binary string) bool
 }
@@ -161,6 +187,7 @@ func New(opts Options) (*Service, error) {
 		runtime:       opts.Runtime,
 		stopTimeout:   timeout,
 		audit:         opts.AuditSink,
+		statuses:      opts.Statuses,
 		binaryChecker: opts.BinaryChecker,
 	}, nil
 }
@@ -175,6 +202,7 @@ func (s *Service) List() ([]ModuleView, error) {
 	for _, d := range mods {
 		v := toView(d)
 		v.State = stateOf(states, d.ID)
+		s.applyStatus(&v)
 		out = append(out, v)
 	}
 	return out, nil
@@ -190,6 +218,7 @@ func (s *Service) Show(id string) (ModuleView, error) {
 	}
 	v := toView(d)
 	v.State = stateOf(s.runtimeStates(), id)
+	s.applyStatus(&v)
 	return v, nil
 }
 
@@ -205,6 +234,7 @@ func (s *Service) Graph() (Graph, error) {
 	for _, d := range mods {
 		v := toView(d)
 		v.HasBinary = s.hasBinary(d.Binary)
+		s.applyStatus(&v)
 		nodes = append(nodes, v)
 	}
 	edges := s.edges()
@@ -604,6 +634,37 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	cleanup = false
 	return nil
+}
+
+// applyStatus 把模块自报状态合并进视图；无来源或无数据时保持零值（{}）。
+//
+// ★ 无数据不是错误：Status 保持零值，JSON 序列化为 {}。
+func (s *Service) applyStatus(v *ModuleView) {
+	if s.statuses == nil || v == nil {
+		return
+	}
+	st, ok := s.statuses.Get(v.ID)
+	if !ok {
+		return
+	}
+	v.Status = moduleStatusOf(st)
+}
+
+// moduleStatusOf 把宿主侧快照转成视图字段；时间统一成 RFC3339Nano 字符串，
+// 保证零值能被 omitempty 省略（time.Time 结构体不会被 omitempty 省略）。
+func moduleStatusOf(st modulestatus.Status) ModuleStatus {
+	ms := ModuleStatus{
+		Healthy: st.Healthy,
+		Message: st.Message,
+		Metrics: st.Metrics,
+	}
+	if !st.At.IsZero() {
+		ms.At = st.At.Format(time.RFC3339Nano)
+	}
+	if !st.ReceivedAt.IsZero() {
+		ms.ReceivedAt = st.ReceivedAt.Format(time.RFC3339Nano)
+	}
+	return ms
 }
 
 // toView 把 registry.Descriptor 转成对外的 ModuleView（State 恒为 unknown）。

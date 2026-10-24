@@ -28,11 +28,13 @@ import (
 	"flow-monitoring/internal/kernel/health"
 	"flow-monitoring/internal/kernel/logging"
 	"flow-monitoring/internal/kernel/modulecontrol"
+	"flow-monitoring/internal/kernel/modulestatus"
 	"flow-monitoring/internal/kernel/pluginhost"
 	"flow-monitoring/internal/kernel/registry"
 	"flow-monitoring/internal/kernel/storage"
 	"flow-monitoring/internal/kernel/transport"
 	"flow-monitoring/internal/modules/store"
+	"flow-monitoring/pkg/plugin"
 )
 
 // detectFeatureTopic 是 capture 进程发布检测告警的事件主题（跨进程契约）。
@@ -40,16 +42,18 @@ const detectFeatureTopic = "detect.feature"
 
 // App 应用实例（进程内基础设施 + 模块进程管理器）。
 type App struct {
-	Cfg          *config.Config
-	Logger       *logging.Logger
-	LogFile      *os.File
-	Bus          *eventbus.Bus
-	Storage      storage.Storage
-	Registry     *registry.Registry
-	Manager      *pluginhost.Manager
-	Health       *health.Health
-	Transport    *transport.Server
-	Alerts       *alerting.Service
+	Cfg       *config.Config
+	Logger    *logging.Logger
+	LogFile   *os.File
+	Bus       *eventbus.Bus
+	Storage   storage.Storage
+	Registry  *registry.Registry
+	Manager   *pluginhost.Manager
+	Health    *health.Health
+	Transport *transport.Server
+	Alerts    *alerting.Service
+	// Statuses 保存模块自报的运行状态（module.status 订阅结果）。
+	Statuses     *modulestatus.Store
 	storageWatch *storageWatch
 }
 
@@ -159,11 +163,16 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 	})
 	ts.SetStaticDir(cfg.StaticDir)
 
+	// 模块状态快照：订阅 module.status（模块 → 宿主），供 /api/modules 展示。
+	// ★ 此处只建对象；真正的订阅在 App.Start 里、启动模块之前完成。
+	statuses := modulestatus.New()
+
 	// 控制面：唯一行为实现（modulecontrol）+ 运行期后端（pluginhost，StopTimeout<=0 用默认值）。
 	// 此时 reg 与 mgr 均已建好（mgr 在上方 Start、reg 在清单加载处），故在此注入。
 	mctl, err := modulecontrol.New(modulecontrol.Options{
 		ManifestDir: cfg.ManifestDir,
 		Logger:      logger,
+		Statuses:    statuses,
 		// 与 pluginhost.Manager.Launch 完全相同的拼路径规则：
 		// PluginDir + 清单 binary（Windows 再加 .exe）。只做只读 os.Stat。
 		BinaryChecker: func(binary string) bool {
@@ -225,6 +234,7 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 		Health:       h,
 		Transport:    ts,
 		Alerts:       alerts,
+		Statuses:     statuses,
 		storageWatch: watch,
 	}, nil
 }
@@ -240,6 +250,12 @@ func (a *App) Start(ctx context.Context) error {
 	//   提前订阅才不会漏掉最早的几条告警。
 	if a.Alerts != nil {
 		a.Alerts.Start(a.Bus, detectFeatureTopic)
+	}
+
+	// 先订阅 module.status 再启动模块：模块 Start 成功后会立即上报一次，
+	// 提前订阅才不会漏掉第一条状态。
+	if a.Statuses != nil {
+		a.Statuses.Start(a.Bus, plugin.StatusTopic)
 	}
 
 	order, err := a.Registry.TopologicalSort()
@@ -285,6 +301,10 @@ func (a *App) Shutdown(ctx context.Context) error {
 	// 先停宿主侧 alerting 订阅（Stop 幂等、会等待消费 goroutine 退出）。
 	if a.Alerts != nil {
 		a.Alerts.Stop()
+	}
+	// 停 module.status 订阅（幂等；在模块进程关闭前退订，避免写已关闭通道）。
+	if a.Statuses != nil {
+		a.Statuses.Stop()
 	}
 
 	if err := a.Transport.Shutdown(ctx); err != nil {

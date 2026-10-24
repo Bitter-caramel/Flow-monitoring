@@ -2,14 +2,36 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
 // EnvHostBridge 模块进程读取宿主桥接地址的环境变量名（宿主 Launch 时注入）。
 const EnvHostBridge = "FLOW_HOST_BRIDGE"
+
+// StatusTopic 是模块向宿主自报运行状态的事件主题（模块 → 宿主方向）。
+//
+// 载荷是一段 JSON（见 StatusReport）；宿主侧由 internal/kernel/modulestatus 订阅。
+// ★ 刻意不新增 RPC 方法：Host 契约（模块→宿主）已提供 Publish，方向无需反转。
+const StatusTopic = "module.status"
+
+// DefaultStatusInterval 是模块状态上报的默认周期（避免刷屏事件总线）。
+const DefaultStatusInterval = 5 * time.Second
+
+// StatusReport 是 module.status 主题的事件载荷。
+//
+// 键值全部是具体类型（字符串 map），保证经 net/rpc/gob 或 JSON 都能稳定编码。
+type StatusReport struct {
+	ModuleID string            `json:"module_id"`
+	Healthy  bool              `json:"healthy"`
+	Message  string            `json:"message"`
+	Metrics  map[string]string `json:"metrics"`
+	At       time.Time         `json:"at"`
+}
 
 // Runtime 模块进程运行时脚手架。
 //
@@ -35,6 +57,9 @@ type Runtime struct {
 	// OnHealth 可选：模块自定义健康检查。为 nil 时 Health 恒返回 healthy，
 	// 保持既有模块零改动、向后兼容。
 	OnHealth func() HealthStatus
+	// StatusInterval 是状态上报周期；<=0 时使用 DefaultStatusInterval（5s）。
+	// ★ 导出以便测试注入短周期（如 20ms），生产环境保持默认。
+	StatusInterval time.Duration
 
 	host     Host
 	cfg      ConfigSnapshot
@@ -42,6 +67,11 @@ type Runtime struct {
 	srv      *http.Server
 	injected map[string]ServiceRef // 已解析的注入服务
 	provided []string              // 本模块注册的服务名（Stop 时回滚）
+
+	// 状态上报 goroutine 的启停控制（Stop 时必须取消并等待退出）。
+	statusMu     sync.Mutex
+	statusCancel context.CancelFunc
+	statusWG     sync.WaitGroup
 }
 
 var _ Module = (*Runtime)(nil)
@@ -118,13 +148,20 @@ func (r *Runtime) Start() error {
 
 	// 4. 业务钩子
 	if r.OnStart != nil {
-		return r.OnStart(host, r.cfg)
+		if err := r.OnStart(host, r.cfg); err != nil {
+			return err
+		}
 	}
+
+	// 5. 状态上报：Start 成功后起 goroutine 定期 Publish("module.status", ...)。
+	r.startStatusReporter()
 	return nil
 }
 
 // Stop 回滚服务注册、执行业务停止钩子并关闭 HTTP 服务（幂等）。
 func (r *Runtime) Stop() error {
+	// ★ 先停状态上报并等待退出：否则取消后仍有 goroutine 在写宿主（可能已关闭）。
+	r.stopStatusReporter()
 	if r.host != nil {
 		for _, name := range r.provided {
 			_ = r.host.UnregisterService(name)
@@ -151,6 +188,87 @@ func (r *Runtime) Health() HealthStatus {
 		return r.OnHealth()
 	}
 	return HealthStatus{Healthy: true}
+}
+
+// startStatusReporter 启动状态上报 goroutine（幂等：已在运行则 no-op）。
+//
+// 必须在 Start 成功后调用（host 已就绪）；Stop 会取消并等待退出。
+func (r *Runtime) startStatusReporter() {
+	if r.host == nil {
+		return
+	}
+	r.statusMu.Lock()
+	if r.statusCancel != nil { // 已在运行
+		r.statusMu.Unlock()
+		return
+	}
+	interval := r.StatusInterval
+	if interval <= 0 {
+		interval = DefaultStatusInterval
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	r.statusCancel = cancel
+	r.statusWG.Add(1)
+	r.statusMu.Unlock()
+
+	go r.reportStatusLoop(ctx, interval)
+}
+
+// reportStatusLoop 立即上报一次，随后按 interval 周期上报。
+func (r *Runtime) reportStatusLoop(ctx context.Context, interval time.Duration) {
+	defer r.statusWG.Done()
+	r.publishStatus()
+
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			r.publishStatus()
+		}
+	}
+}
+
+// publishStatus 取一次 Health() 并把结果发布到 module.status。
+//
+// ★ 发布失败只记日志，绝不影响模块运行。
+func (r *Runtime) publishStatus() {
+	if r.host == nil {
+		return
+	}
+	st := r.Health()
+	metrics := st.Metrics
+	if metrics == nil {
+		metrics = map[string]string{}
+	}
+	payload, err := json.Marshal(StatusReport{
+		ModuleID: r.Spec.ID,
+		Healthy:  st.Healthy,
+		Message:  st.Message,
+		Metrics:  metrics,
+		At:       time.Now(),
+	})
+	if err != nil {
+		r.host.Log("warn", "module "+r.Spec.ID+" 状态序列化失败: "+err.Error())
+		return
+	}
+	if err := r.host.Publish(StatusTopic, payload); err != nil {
+		r.host.Log("warn", "module "+r.Spec.ID+" 状态上报失败: "+err.Error())
+	}
+}
+
+// stopStatusReporter 取消状态上报并等待 goroutine 退出（幂等）。
+func (r *Runtime) stopStatusReporter() {
+	r.statusMu.Lock()
+	cancel := r.statusCancel
+	r.statusCancel = nil
+	r.statusMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	r.statusWG.Wait()
 }
 
 // DialHostFromEnv 从环境变量回连宿主桥接服务。

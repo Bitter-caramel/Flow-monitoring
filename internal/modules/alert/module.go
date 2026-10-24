@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -309,18 +310,21 @@ func (m *alertModule) stop() error {
 }
 
 // health 返回真实运行态与消费进度。
+//
+// 无论健康与否都带上运行指标（Metrics），供宿主 /api/modules 展示：
+//
+//	delivered  已从总线投递到消费者的事件数
+//	gaps       轮询检测到的断层次数
+//	errors     Poll/解码错误总数
+//	written    已写入落点的告警数
+//	suppressed 被抑制的告警数
+//
+// ★ 数值一律 strconv.FormatUint 转字符串（gob 安全）。
 func (m *alertModule) health() plugin.HealthStatus {
 	m.mu.Lock()
 	started, runErr := m.started, m.runErr
 	src, cons := m.src, m.consumer
 	m.mu.Unlock()
-
-	if runErr != "" {
-		return plugin.HealthStatus{Healthy: false, Message: runErr}
-	}
-	if !started {
-		return plugin.HealthStatus{Healthy: false, Message: "alert: 未启动"}
-	}
 
 	var st pollsource.Stats
 	if src != nil {
@@ -332,11 +336,27 @@ func (m *alertModule) health() plugin.HealthStatus {
 		suppressed = cons.Suppressed()
 	}
 	errs := st.Errors + m.decodeErrs.Load()
+	metrics := map[string]string{
+		"delivered":  strconv.FormatUint(st.Delivered, 10),
+		"gaps":       strconv.FormatUint(st.Gaps, 10),
+		"errors":     strconv.FormatUint(errs, 10),
+		"written":    strconv.FormatUint(written, 10),
+		"suppressed": strconv.FormatUint(suppressed, 10),
+	}
+
+	if runErr != "" {
+		return plugin.HealthStatus{Healthy: false, Message: runErr, Metrics: metrics}
+	}
+	if !started {
+		return plugin.HealthStatus{Healthy: false, Message: "alert: 未启动", Metrics: metrics}
+	}
+
 	return plugin.HealthStatus{
 		Healthy: true,
 		Message: fmt.Sprintf(
 			"alert: 已投递 %d / 断层 %d / 错误 %d / 已写 %d / 已抑制 %d",
 			st.Delivered, st.Gaps, errs, written, suppressed),
+		Metrics: metrics,
 	}
 }
 

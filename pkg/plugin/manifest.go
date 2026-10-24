@@ -65,6 +65,12 @@ type Manifest struct {
 type HealthStatus struct {
 	Healthy bool
 	Message string
+	// Metrics 是模块自报的运行指标。
+	//
+	// ★ 键值统一用字符串（map[string]string），因为 HealthStatus 会经 net/rpc
+	// （gob 编码）往返；gob 对 interface{} 的具体类型无法稳定编码，用字符串最稳。
+	// 数值请用 strconv.FormatUint/FormatInt 转成字符串。
+	Metrics map[string]string
 }
 
 // 服务种类（ServiceRef.Kind）。

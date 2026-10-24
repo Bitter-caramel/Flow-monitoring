@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -247,16 +248,47 @@ func (m *captureModule) stop() error {
 }
 
 // health 返回真实运行态：加载失败 ⇒ 不健康；运行中/正常结束 ⇒ 健康。
+//
+// 无论健康与否都带上运行指标（Metrics），供宿主 /api/modules 展示。
 func (m *captureModule) health() plugin.HealthStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	metrics := m.metricsLocked()
 	if m.runErr != "" {
-		return plugin.HealthStatus{Healthy: false, Message: m.runErr}
+		return plugin.HealthStatus{Healthy: false, Message: m.runErr, Metrics: metrics}
 	}
 	if !m.started {
-		return plugin.HealthStatus{Healthy: false, Message: "capture: 未启动"}
+		return plugin.HealthStatus{Healthy: false, Message: "capture: 未启动", Metrics: metrics}
 	}
-	return plugin.HealthStatus{Healthy: true}
+	return plugin.HealthStatus{Healthy: true, Metrics: metrics}
+}
+
+// metricsLocked 汇总采集模块的运行指标；调用方必须持有 m.mu。
+//
+//	packets_total 所有 Run 累计处理包数
+//	alerts_total  所有 Run 累计命中的告警数
+//	rules_total   已加载并成功编译的规则数
+//	runs_running  正在运行的 Run 数
+//	runs_total    当前保留的 Run 总数（含已结束）
+//
+// ★ 数值一律 strconv.FormatInt 转字符串（gob 安全）。
+func (m *captureModule) metricsLocked() map[string]string {
+	var packets, alerts int
+	for _, r := range m.runs {
+		packets += r.Packets
+		alerts += r.Alerts
+	}
+	rules := 0
+	if m.ruleset != nil {
+		rules = len(m.ruleset.Programs)
+	}
+	return map[string]string{
+		"packets_total": strconv.FormatInt(int64(packets), 10),
+		"alerts_total":  strconv.FormatInt(int64(alerts), 10),
+		"rules_total":   strconv.FormatInt(int64(rules), 10),
+		"runs_running":  strconv.FormatInt(int64(m.countRunningLocked()), 10),
+		"runs_total":    strconv.FormatInt(int64(len(m.runs)), 10),
+	}
 }
 
 // processFrame 解码并处理单帧；recover 保证一个坏包不会打死整个进程（技术债 #10）。
