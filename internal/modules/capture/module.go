@@ -1,7 +1,6 @@
 package capture
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -137,14 +136,11 @@ func (m *captureModule) start(host plugin.Host, cfg plugin.ConfigSnapshot) error
 	}
 	m.mu.Unlock()
 
-	var root struct {
-		Detect detectSettings `json:"detect"`
-	}
-	if err := json.Unmarshal([]byte(cfg.Raw), &root); err != nil {
+	var settings detectSettings
+	if err := cfg.Section("detect", &settings); err != nil {
 		m.setRunErr(fmt.Sprintf("capture: 解析配置失败: %v", err))
 		return nil
 	}
-	settings := root.Detect
 	if settings.RulesDir == "" {
 		m.setRunErr("capture: detect.rules_dir 为空，无法加载规则")
 		return nil

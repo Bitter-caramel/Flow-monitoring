@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"flow-monitoring/pkg/plugin"
+	"flow-monitoring/pkg/plugintest"
 )
 
 // staticTestConfig 构造“只做静态分析”的配置：replay_file 为空，
@@ -45,11 +46,11 @@ func staticTestCapture() plugin.CaptureRecord {
 }
 
 // newStaticModule 启动一个只等待静态任务的 capture 模块。
-func newStaticModule(t *testing.T, maxRuns int) (*captureModule, *fakeHost, http.Handler) {
+func newStaticModule(t *testing.T, maxRuns int) (*captureModule, *plugintest.Host, http.Handler) {
 	t.Helper()
 	cfg := staticTestConfig(t)
-	host := newFakeHost(cfg)
-	host.captures = map[string]plugin.CaptureRecord{
+	host := newHost(cfg)
+	host.Captures = map[string]plugin.CaptureRecord{
 		"cap-sqli": staticTestCapture(),
 	}
 	m := &captureModule{}
@@ -149,7 +150,7 @@ func TestStaticRunsConcurrentIsolated(t *testing.T) {
 		}
 	}
 
-	pubs, logs := host.snapshot()
+	pubs, logs := snapshotHost(host)
 	byRun := map[string][]map[string]any{}
 	for _, p := range pubs {
 		if p.topic != topicDetectFeature {

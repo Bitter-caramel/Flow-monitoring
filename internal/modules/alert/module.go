@@ -32,12 +32,6 @@ type alertSettings struct {
 	SinkPath string `json:"sink_path"`
 }
 
-// rawConfig 同时兼容 {"alert":{"sink_path":...}} 与 {"alert.sink_path":...} 两种写法。
-type rawConfig struct {
-	Alert    alertSettings `json:"alert"`
-	FlatPath string        `json:"alert.sink_path"`
-}
-
 // featureEvent 是 detect.feature 主题的扁平载荷（与 capture 发布的结构一致）。
 //
 // ★ 这里刻意在本包内重新声明一份 DTO，而不是 import capture 模块：
@@ -372,18 +366,17 @@ func (m *alertModule) closeSource() {
 
 // resolveSinkPath 从配置快照解析 alert.sink_path，缺省 data/alerts.jsonl。
 func resolveSinkPath(cfg plugin.ConfigSnapshot) string {
-	if cfg.Raw == "" {
+	var settings alertSettings
+	if err := cfg.Section("alert", &settings); err != nil {
 		return defaultSinkPath
 	}
-	var rc rawConfig
-	if err := json.Unmarshal([]byte(cfg.Raw), &rc); err != nil {
-		return defaultSinkPath
+	if settings.SinkPath != "" {
+		return settings.SinkPath
 	}
-	if rc.Alert.SinkPath != "" {
-		return rc.Alert.SinkPath
-	}
-	if rc.FlatPath != "" {
-		return rc.FlatPath
+	// 兼容扁平写法 {"alert.sink_path": "..."}：它不是顶层 alert 对象。
+	var flat string
+	if err := cfg.Section("alert.sink_path", &flat); err == nil && flat != "" {
+		return flat
 	}
 	return defaultSinkPath
 }

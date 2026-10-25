@@ -1,6 +1,10 @@
 package plugin
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // Void 是 net/rpc 方法的空返回值（占位）。
 //
@@ -76,4 +80,31 @@ type RunRecord struct {
 type RunStore interface {
 	RunSave(rec RunRecord) error
 	RunList(limit int) []RunRecord
+}
+
+// Section 把 ConfigSnapshot.Raw 里指定的顶层键解成 out。
+//
+// 键不存在或 Raw 为空时返回 nil（不视为错误），out 保持零值；
+// JSON 非法或该键的值无法解成 out 时返回带上下文的错误。
+//
+// 典型用法（替代手写 json.Unmarshal([]byte(cfg.Raw), &root)）：
+//
+//	var settings detectSettings
+//	if err := cfg.Section("detect", &settings); err != nil { ... }
+func (c ConfigSnapshot) Section(key string, out any) error {
+	if c.Raw == "" {
+		return nil
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(c.Raw), &top); err != nil {
+		return fmt.Errorf("plugin: 解析配置快照失败: %w", err)
+	}
+	raw, ok := top[key]
+	if !ok {
+		return nil
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("plugin: 解析配置段 %q 失败: %w", key, err)
+	}
+	return nil
 }

@@ -5,91 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"flow-monitoring/pkg/plugin"
+	"flow-monitoring/pkg/plugintest"
 )
-
-// alertFakeHost 是告警模块测试用的可控宿主桩。
-type alertFakeHost struct {
-	mu      sync.Mutex
-	records map[string][]plugin.EventRecord
-	logs    []string
-}
-
-var _ plugin.Host = (*alertFakeHost)(nil)
-
-func newAlertFakeHost() *alertFakeHost {
-	return &alertFakeHost{records: make(map[string][]plugin.EventRecord)}
-}
-
-func (h *alertFakeHost) append(topic string, seq uint64, data []byte) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.records[topic] = append(h.records[topic], plugin.EventRecord{
-		Topic: topic,
-		Seq:   seq,
-		Data:  append([]byte(nil), data...),
-		Time:  time.Now(),
-	})
-}
-
-func (h *alertFakeHost) Config() plugin.ConfigSnapshot { return plugin.ConfigSnapshot{} }
-
-func (h *alertFakeHost) Log(level, msg string) {
-	h.mu.Lock()
-	h.logs = append(h.logs, level+"|"+msg)
-	h.mu.Unlock()
-}
-
-func (h *alertFakeHost) Publish(string, []byte) error { return nil }
-
-func (h *alertFakeHost) Poll(topic string, since uint64, max int) []plugin.EventRecord {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if max <= 0 {
-		max = 100
-	}
-	var out []plugin.EventRecord
-	for _, ev := range h.records[topic] {
-		if ev.Seq > since {
-			out = append(out, ev)
-			if len(out) >= max {
-				break
-			}
-		}
-	}
-	return out
-}
-
-func (h *alertFakeHost) RegisterHTTP(string, string, string) error { return nil }
-func (h *alertFakeHost) RegisterService(plugin.ServiceRef) error   { return nil }
-func (h *alertFakeHost) LookupService(string) (plugin.ServiceRef, bool) {
-	return plugin.ServiceRef{}, false
-}
-func (h *alertFakeHost) UnregisterService(string) error           { return nil }
-func (h *alertFakeHost) CaptureCreate(plugin.CaptureRecord) error { return nil }
-func (h *alertFakeHost) CaptureGet(string) (plugin.CaptureRecord, bool) {
-	return plugin.CaptureRecord{}, false
-}
-func (h *alertFakeHost) CaptureList(plugin.Page) plugin.CapturePage { return plugin.CapturePage{} }
-func (h *alertFakeHost) CaptureDelete(string) error                 { return nil }
-func (h *alertFakeHost) PacketSaveBatch(string, []plugin.PacketRecord) error {
-	return nil
-}
-func (h *alertFakeHost) PacketList(string, plugin.Page) plugin.PacketPage {
-	return plugin.PacketPage{}
-}
-func (h *alertFakeHost) PacketCount(string) int    { return 0 }
-func (h *alertFakeHost) PacketDelete(string) error { return nil }
-
-func (h *alertFakeHost) logText() string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return strings.Join(h.logs, "\n")
-}
 
 // waitAlertFor 轮询等待条件成立（名字避开同包 consumer_test.go 里的 waitFor）。
 func waitAlertFor(t *testing.T, what string, cond func() bool) {
@@ -156,8 +77,8 @@ func TestModuleWritesValidDetectFeature(t *testing.T) {
 	dir := t.TempDir()
 	sinkPath := filepath.Join(dir, "alerts.jsonl")
 
-	host := newAlertFakeHost()
-	host.append(topicDetectFeature, 1, []byte(validFeatureJSON))
+	host := plugintest.New()
+	host.Append(topicDetectFeature, 1, []byte(validFeatureJSON))
 
 	m := &alertModule{}
 	if err := m.start(host, configWithSink(sinkPath)); err != nil {
@@ -204,8 +125,8 @@ func TestModuleInvalidJSONCountsError(t *testing.T) {
 	dir := t.TempDir()
 	sinkPath := filepath.Join(dir, "alerts.jsonl")
 
-	host := newAlertFakeHost()
-	host.append(topicDetectFeature, 1, []byte("this is not json"))
+	host := plugintest.New()
+	host.Append(topicDetectFeature, 1, []byte("this is not json"))
 
 	m := &alertModule{}
 	if err := m.start(host, configWithSink(sinkPath)); err != nil {
@@ -226,7 +147,7 @@ func TestModuleInvalidJSONCountsError(t *testing.T) {
 		t.Errorf("非法载荷不应写文件，实际 %d 行：%v", len(lines), lines)
 	}
 	// 进程仍然可用：再投一条合法事件，应能继续消费。
-	host.append(topicDetectFeature, 2, []byte(validFeatureJSON))
+	host.Append(topicDetectFeature, 2, []byte(validFeatureJSON))
 	waitAlertFor(t, "坏载荷后仍能消费", func() bool {
 		m.mu.Lock()
 		c := m.consumer
@@ -253,7 +174,7 @@ func TestModuleStopIdempotent(t *testing.T) {
 	sinkPath := filepath.Join(dir, "alerts.jsonl")
 
 	m := &alertModule{}
-	if err := m.start(newAlertFakeHost(), configWithSink(sinkPath)); err != nil {
+	if err := m.start(plugintest.New(), configWithSink(sinkPath)); err != nil {
 		t.Fatalf("start 失败: %v", err)
 	}
 	if err := m.stop(); err != nil {

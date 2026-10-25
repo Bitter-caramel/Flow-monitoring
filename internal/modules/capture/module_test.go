@@ -6,7 +6,6 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"flow-monitoring/internal/kernel/datamodel"
 	"flow-monitoring/internal/modules/detect"
 	"flow-monitoring/pkg/plugin"
+	"flow-monitoring/pkg/plugintest"
 )
 
 // publishedEvent 记录一次 Publish 调用。
@@ -22,93 +22,33 @@ type publishedEvent struct {
 	data  []byte
 }
 
-// fakeHost 是 plugin.Host 的最小桩：记录 Publish/Log，并可从 captures 表
-// 返回固定的抓包记录（静态分析用例需要 CaptureGet 命中）。
-type fakeHost struct {
-	cfg      plugin.ConfigSnapshot
-	captures map[string]plugin.CaptureRecord
-
-	mu        sync.Mutex
-	published []publishedEvent
-	logs      []string
-
-	done     chan struct{}
-	doneOnce sync.Once
+// newHost 构造注入了配置的假宿主。
+func newHost(cfg plugin.ConfigSnapshot) *plugintest.Host {
+	h := plugintest.New()
+	h.Cfg = cfg
+	return h
 }
 
-var _ plugin.Host = (*fakeHost)(nil)
-
-func newFakeHost(cfg plugin.ConfigSnapshot) *fakeHost {
-	return &fakeHost{cfg: cfg, done: make(chan struct{})}
-}
-
-func (h *fakeHost) Config() plugin.ConfigSnapshot { return h.cfg }
-
-func (h *fakeHost) Log(level, msg string) {
-	h.mu.Lock()
-	h.logs = append(h.logs, level+"|"+msg)
-	h.mu.Unlock()
-	if strings.Contains(msg, "capture: replay finished") {
-		h.doneOnce.Do(func() { close(h.done) })
+// snapshotHost 把 plugintest 的公开记录转成测试内部的紧凑视图。
+func snapshotHost(h *plugintest.Host) ([]publishedEvent, []string) {
+	pubs, logs := h.Snapshot()
+	pe := make([]publishedEvent, len(pubs))
+	for i, p := range pubs {
+		pe[i] = publishedEvent{topic: p.Topic, data: p.Data}
 	}
+	lines := make([]string, len(logs))
+	for i, l := range logs {
+		lines[i] = l.Level + "|" + l.Msg
+	}
+	return pe, lines
 }
 
-func (h *fakeHost) Publish(topic string, data []byte) error {
-	cp := append([]byte(nil), data...)
-	h.mu.Lock()
-	h.published = append(h.published, publishedEvent{topic: topic, data: cp})
-	h.mu.Unlock()
-	return nil
-}
-
-func (h *fakeHost) Poll(string, uint64, int) []plugin.EventRecord { return nil }
-
-func (h *fakeHost) RegisterHTTP(string, string, string) error { return nil }
-
-func (h *fakeHost) RegisterService(plugin.ServiceRef) error { return nil }
-
-func (h *fakeHost) LookupService(string) (plugin.ServiceRef, bool) {
-	return plugin.ServiceRef{}, false
-}
-
-func (h *fakeHost) UnregisterService(string) error { return nil }
-
-func (h *fakeHost) CaptureCreate(plugin.CaptureRecord) error { return nil }
-
-func (h *fakeHost) CaptureGet(id string) (plugin.CaptureRecord, bool) {
-	rec, ok := h.captures[id]
-	return rec, ok
-}
-
-func (h *fakeHost) CaptureList(plugin.Page) plugin.CapturePage { return plugin.CapturePage{} }
-
-func (h *fakeHost) CaptureDelete(string) error { return nil }
-
-func (h *fakeHost) PacketSaveBatch(string, []plugin.PacketRecord) error { return nil }
-
-func (h *fakeHost) PacketList(string, plugin.Page) plugin.PacketPage {
-	return plugin.PacketPage{}
-}
-
-func (h *fakeHost) PacketCount(string) int { return 0 }
-
-func (h *fakeHost) PacketDelete(string) error { return nil }
-
-func (h *fakeHost) waitDone(t *testing.T) {
+// hostWaitDone 等待回放结束日志。
+func hostWaitDone(t *testing.T, h *plugintest.Host) {
 	t.Helper()
-	select {
-	case <-h.done:
-	case <-time.After(10 * time.Second):
+	if !h.WaitLog("capture: replay finished", 10*time.Second) {
 		t.Fatal("等待“capture: replay finished”日志超时")
 	}
-}
-
-func (h *fakeHost) snapshot() ([]publishedEvent, []string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	pubs := append([]publishedEvent(nil), h.published...)
-	logs := append([]string(nil), h.logs...)
-	return pubs, logs
 }
 
 // testSnapshot 构造只含 detect 私有段的宿主配置快照。
@@ -129,16 +69,16 @@ func testSnapshot(t *testing.T, replayName string) plugin.ConfigSnapshot {
 // TestModulePublishesSQLiAlerts 用 sqli 样本跑完整回放：
 // 每个告警 → detect.feature，且 payload 带 rule_id。
 func TestModulePublishesSQLiAlerts(t *testing.T) {
-	host := newFakeHost(testSnapshot(t, "sqli.pcapng"))
+	host := newHost(testSnapshot(t, "sqli.pcapng"))
 	m := &captureModule{}
-	if err := m.start(host, host.cfg); err != nil {
+	if err := m.start(host, host.Cfg); err != nil {
 		t.Fatalf("start 失败: %v", err)
 	}
 	defer m.stop()
 
-	host.waitDone(t)
+	hostWaitDone(t, host)
 
-	pubs, logs := host.snapshot()
+	pubs, logs := snapshotHost(host)
 	if got, want := len(pubs), 3; got != want {
 		t.Fatalf("Publish 调用次数 = %d，期望 %d（日志：%v）", got, want, logs)
 	}
@@ -168,16 +108,16 @@ func TestModulePublishesSQLiAlerts(t *testing.T) {
 
 // TestModuleNormalNoAlerts 用 normal 样本验证零命中时 Publish 不调用。
 func TestModuleNormalNoAlerts(t *testing.T) {
-	host := newFakeHost(testSnapshot(t, "normal.pcapng"))
+	host := newHost(testSnapshot(t, "normal.pcapng"))
 	m := &captureModule{}
-	if err := m.start(host, host.cfg); err != nil {
+	if err := m.start(host, host.Cfg); err != nil {
 		t.Fatalf("start 失败: %v", err)
 	}
 	defer m.stop()
 
-	host.waitDone(t)
+	hostWaitDone(t, host)
 
-	pubs, logs := host.snapshot()
+	pubs, logs := snapshotHost(host)
 	if got := len(pubs); got != 0 {
 		t.Fatalf("Publish 调用次数 = %d，期望 0（日志：%v）", got, logs)
 	}
@@ -215,7 +155,7 @@ func TestModuleRecoversPerPacketPanic(t *testing.T) {
 		{TS: time.Now(), LinkType: 1},
 		{TS: time.Now(), LinkType: 1},
 	}}
-	host := newFakeHost(testSnapshot(t, "sqli.pcapng"))
+	host := newHost(testSnapshot(t, "sqli.pcapng"))
 	m := &captureModule{
 		newSource: func(string) (Source, error) { return src, nil },
 		process: func(hp *hotpath.Hotpath, p *datamodel.Packet) []detect.Alert {
@@ -225,14 +165,14 @@ func TestModuleRecoversPerPacketPanic(t *testing.T) {
 			return hp.Process(p)
 		},
 	}
-	if err := m.start(host, host.cfg); err != nil {
+	if err := m.start(host, host.Cfg); err != nil {
 		t.Fatalf("start 失败: %v", err)
 	}
 	defer m.stop()
 
-	host.waitDone(t)
+	hostWaitDone(t, host)
 
-	pubs, logs := host.snapshot()
+	pubs, logs := snapshotHost(host)
 	if got := len(pubs); got != 0 {
 		t.Fatalf("Publish 调用次数 = %d，期望 0（坏包不应产出告警）", got)
 	}
@@ -262,9 +202,9 @@ func TestModuleHealthOnBadRulesDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造测试配置失败: %v", err)
 	}
-	host := newFakeHost(plugin.ConfigSnapshot{Raw: string(raw)})
+	host := newHost(plugin.ConfigSnapshot{Raw: string(raw)})
 	m := &captureModule{}
-	if err := m.start(host, host.cfg); err != nil {
+	if err := m.start(host, host.Cfg); err != nil {
 		t.Fatalf("start 不应返回错误（加载失败由 Health 上报）: %v", err)
 	}
 	defer m.stop()
@@ -281,16 +221,16 @@ func TestModuleHealthOnBadRulesDir(t *testing.T) {
 // TestModulePublishesRunIDAndMode featureEvent 载荷必须带 run_id 与 mode=live，
 // 供宿主按分析任务归属过滤（阶段 2 的唯一产出 mode 是 live）。
 func TestModulePublishesRunIDAndMode(t *testing.T) {
-	host := newFakeHost(testSnapshot(t, "sqli.pcapng"))
+	host := newHost(testSnapshot(t, "sqli.pcapng"))
 	m := &captureModule{}
-	if err := m.start(host, host.cfg); err != nil {
+	if err := m.start(host, host.Cfg); err != nil {
 		t.Fatalf("start 失败: %v", err)
 	}
 	defer m.stop()
 
-	host.waitDone(t)
+	hostWaitDone(t, host)
 
-	pubs, logs := host.snapshot()
+	pubs, logs := snapshotHost(host)
 	if len(pubs) == 0 {
 		t.Fatalf("没有任何 Publish（日志：%v）", logs)
 	}
