@@ -25,6 +25,7 @@ type Packet struct {
 	Iface   int       // 所属接口 ID（pcapng IDB 索引）
 	Data    []byte    // 原始字节（解析用，subarray 零拷贝视图）
 	DataOff int64     // 在 Capture.Raw 中的偏移（按需取字节用）
+	Offset  int       // 该包数据在原始文件中的字节偏移（指向包数据起点；详情接口按此 Seek）
 	NoTime  bool      // SPB 类无时间戳包
 	Snapped bool      // snaplen 截断标记（CapLen < OrigLen）
 

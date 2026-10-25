@@ -224,12 +224,12 @@ func (s *packetStore) SaveBatch(ctx context.Context, captureID string, packets [
 	for _, pk := range packets {
 		rows = append(rows, []any{
 			captureID, pk.No, nullableTime(pk.Time), pk.SrcIP, pk.DstIP,
-			int(pk.SrcPort), int(pk.DstPort), pk.Proto, pk.Info, pk.CapLen, pk.OrigLen,
+			int(pk.SrcPort), int(pk.DstPort), pk.Proto, pk.Info, pk.CapLen, pk.OrigLen, pk.Offset,
 		})
 	}
 	_, err := s.p.pool.CopyFrom(ctx,
 		pgx.Identifier{"packets"},
-		[]string{"capture_id", "no", "time", "src_ip", "dst_ip", "src_port", "dst_port", "proto", "info", "cap_len", "orig_len"},
+		[]string{"capture_id", "no", "time", "src_ip", "dst_ip", "src_port", "dst_port", "proto", "info", "cap_len", "orig_len", "offset"},
 		pgx.CopyFromRows(rows),
 	)
 	if err != nil {
@@ -240,7 +240,7 @@ func (s *packetStore) SaveBatch(ctx context.Context, captureID string, packets [
 
 func (s *packetStore) ListByCapture(ctx context.Context, captureID string, page storage.Page) (*storage.PageResult[storage.PacketRecord], error) {
 	rows, err := s.p.pool.Query(ctx, `
-                SELECT no, time, src_ip, dst_ip, src_port, dst_port, proto, info, cap_len, orig_len
+                SELECT no, time, src_ip, dst_ip, src_port, dst_port, proto, info, cap_len, orig_len, "offset"
                 FROM packets WHERE capture_id = $1 ORDER BY no ASC LIMIT $2 OFFSET $3`,
 		captureID, page.Limit, page.Offset,
 	)
@@ -255,7 +255,7 @@ func (s *packetStore) ListByCapture(ctx context.Context, captureID string, page 
 		var ts *time.Time
 		if err := rows.Scan(
 			&pk.No, &ts, &pk.SrcIP, &pk.DstIP, &pk.SrcPort, &pk.DstPort,
-			&pk.Proto, &pk.Info, &pk.CapLen, &pk.OrigLen,
+			&pk.Proto, &pk.Info, &pk.CapLen, &pk.OrigLen, &pk.Offset,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan packet: %w", err)
 		}
@@ -270,7 +270,7 @@ func (s *packetStore) ListByCapture(ctx context.Context, captureID string, page 
 
 func (s *packetStore) ListByEndpoints(ctx context.Context, ep1, ep2 storage.Endpoint, page storage.Page) (*storage.PageResult[storage.PacketRecord], error) {
 	rows, err := s.p.pool.Query(ctx, `
-                SELECT capture_id, no, time, src_ip, dst_ip, src_port, dst_port, proto, info, cap_len, orig_len
+                SELECT capture_id, no, time, src_ip, dst_ip, src_port, dst_port, proto, info, cap_len, orig_len, "offset"
                 FROM packets
                 WHERE (src_ip = $1 AND src_port = $2 AND dst_ip = $3 AND dst_port = $4)
                    OR (src_ip = $3 AND src_port = $4 AND dst_ip = $1 AND dst_port = $2)
@@ -288,7 +288,7 @@ func (s *packetStore) ListByEndpoints(ctx context.Context, ep1, ep2 storage.Endp
 		var ts *time.Time
 		if err := rows.Scan(
 			&pk.CaptureID, &pk.No, &ts, &pk.SrcIP, &pk.DstIP, &pk.SrcPort, &pk.DstPort,
-			&pk.Proto, &pk.Info, &pk.CapLen, &pk.OrigLen,
+			&pk.Proto, &pk.Info, &pk.CapLen, &pk.OrigLen, &pk.Offset,
 		); err != nil {
 			return nil, fmt.Errorf("store: scan packet: %w", err)
 		}

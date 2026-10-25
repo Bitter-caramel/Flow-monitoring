@@ -29,8 +29,14 @@ CREATE TABLE IF NOT EXISTS packets (
     info       TEXT,
     cap_len    INTEGER,
     orig_len   INTEGER,
+    -- C2："offset" 是 SQL 保留字，必须加双引号。指向包数据在原始文件中的字节偏移。
+    -- 旧数据为 0（无索引），详情接口会退回全量解析。
+    "offset"   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (capture_id, no)
 );
+
+-- C2 幂等迁移：已存在的 packets 表补 offset 列。
+ALTER TABLE packets ADD COLUMN IF NOT EXISTS "offset" INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_packets_capture_no ON packets (capture_id, no);
 

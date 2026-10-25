@@ -82,6 +82,7 @@ func toPacketRecord(p *datamodel.Packet) storage.PacketRecord {
 		Info:    p.Info,
 		CapLen:  p.CapLen,
 		OrigLen: p.OrigLen,
+		Offset:  p.Offset,
 	}
 }
 

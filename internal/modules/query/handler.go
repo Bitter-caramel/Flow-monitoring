@@ -129,6 +129,8 @@ func (s *Service) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, ErrInvalidPacketNo):
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		case errors.Is(err, ErrPacketNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		case errors.Is(err, ErrFileTooLarge):
 			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": err.Error()})
 		case errors.Is(err, storage.ErrNotFound):

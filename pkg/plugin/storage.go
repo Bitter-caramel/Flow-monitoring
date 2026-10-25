@@ -35,6 +35,7 @@ type PacketRecord struct {
 	Info      string    `json:"info"`     // Wireshark 风格 INFO
 	CapLen    int       `json:"cap_len"`  // 抓取长度
 	OrigLen   int       `json:"orig_len"` // 原始长度
+	Offset    int       `json:"offset"`   // 该包数据在原始文件中的字节偏移（0 = 旧数据，无索引）
 }
 
 // Page 分页参数。

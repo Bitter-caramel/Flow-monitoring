@@ -132,7 +132,9 @@ func Parse(data []byte, limit int) (*datamodel.Capture, error) {
 			r.parseIDB(c, bodyStart, bodyEnd)
 		case blockEPB:
 			no = r.parseEPB(c, no, bodyStart, bodyEnd)
-		case blockSPB, blockPB, blockNRB, blockISB, blockDSB:
+		case blockSPB:
+			no = r.parseSPB(c, no, bodyStart, bodyEnd)
+		case blockPB, blockNRB, blockISB, blockDSB:
 			// 暂未实现：跳过（块边界已校验，直接前进）
 		default:
 			// 未知块：跳过
@@ -310,6 +312,7 @@ func (r *reader) parseEPB(c *datamodel.Capture, no, bodyStart, bodyEnd int) int 
 	p.Iface = iid
 	p.Data = r.data[dataStart:dataEnd]
 	p.DataOff = int64(dataStart)
+	p.Offset = dataStart
 
 	// 包级选项（EPB 数据区 4 字节对齐后）
 	padded := bodyStart + 20 + capLen + ((4 - (capLen % 4)) % 4)
@@ -327,6 +330,49 @@ func (r *reader) parseEPB(c *datamodel.Capture, no, bodyStart, bodyEnd int) int 
 			}
 		}
 	}
+
+	c.Packets = append(c.Packets, p)
+	return no + 1
+}
+
+// parseSPB 解析 Simple Packet Block，返回新的包序号。
+//
+// SPB 没有 interface id / timestamp / caplen 字段：
+//   - 数据起点 = 块起点 + 8（块头）+ 4（Original Packet Length）
+//   - 捕获长度由块总长推出；用 origLen 去掉 4 字节对齐 padding
+//
+// 记录 Offset 是为了让详情接口能按偏移直接 Seek 读取，和 EPB 一致。
+func (r *reader) parseSPB(c *datamodel.Capture, no, bodyStart, bodyEnd int) int {
+	if bodyStart+4 > len(r.data) {
+		return no
+	}
+	origLen := int(r.bo.Uint32(r.data[bodyStart : bodyStart+4]))
+
+	dataStart := bodyStart + 4
+	dataEnd := bodyEnd
+	if origLen >= 0 && dataStart+origLen <= dataEnd {
+		// origLen 小于块内可容纳长度时，按 origLen 截断以去掉 padding。
+		dataEnd = dataStart + origLen
+	}
+	if dataEnd > len(r.data) {
+		dataEnd = len(r.data)
+	}
+	if dataEnd < dataStart {
+		dataEnd = dataStart
+	}
+
+	p := datamodel.NewPacket()
+	p.No = no + 1
+	p.CapLen = dataEnd - dataStart
+	p.OrigLen = origLen
+	if p.OrigLen == 0 {
+		p.OrigLen = p.CapLen
+	}
+	p.Iface = 0
+	p.NoTime = true
+	p.Data = r.data[dataStart:dataEnd]
+	p.DataOff = int64(dataStart)
+	p.Offset = dataStart
 
 	c.Packets = append(c.Packets, p)
 	return no + 1

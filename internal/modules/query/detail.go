@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,7 +25,11 @@ import (
 const (
 	// maxDetailFileSize 是包详情接口允许读取的单个抓包文件上限（64 MB）。
 	// 超过直接 413，避免一个超大文件在单次请求里把内存打满。
+	// ★ 仅在"无偏移索引、退回全量解析"时生效；有 offset 时只读一个包。
 	maxDetailFileSize = 64 << 20
+	// maxDetailPacketSize 是单包 CapLen 的防御上限（16 MB）。
+	// 索引异常（截断/损坏）时避免把超大值带进 make([]byte, n)。
+	maxDetailPacketSize = 16 << 20
 	// maxPayloadText 是 payload_text 的上限（8 KB），超出部分截断并标记。
 	maxPayloadText = 8 * 1024
 	// detailTimeLayout 固定 6 位小数 + 时区，与前端契约示例一致。
@@ -34,8 +39,12 @@ const (
 var (
 	// ErrInvalidPacketNo 包序号非法（< 1）。
 	ErrInvalidPacketNo = errors.New("包序号必须大于等于 1")
-	// ErrFileTooLarge 抓包文件超过单次请求上限。
-	ErrFileTooLarge = errors.New("抓包文件超过 64 MB 上限")
+
+	// ErrPacketNotFound 包序号超出该抓包的实际包数（HTTP 404）。
+	ErrPacketNotFound = errors.New("该包不存在")
+	// ErrFileTooLarge 单次详情读取超过大小上限（整文件 64 MB / 单包 16 MB）。
+	// 复用同一个 sentinel，让 handler 统一映射成 413。
+	ErrFileTooLarge = errors.New("单次详情读取超过大小上限")
 )
 
 // LayerField 是协议树中的一个字段（键值对）。
@@ -77,11 +86,12 @@ type PacketDetail struct {
 //   - no < 1                      → ErrInvalidPacketNo（HTTP 400）
 //   - capture 不存在              → storage.ErrNotFound（HTTP 404）
 //   - no 超过文件内包数           → storage.ErrNotFound（HTTP 404）
-//   - 文件超过 64 MB              → ErrFileTooLarge（HTTP 413）
+//   - 单包 CapLen 超过 16 MB      → ErrFileTooLarge（HTTP 413）
+//   - 无偏移索引且文件超过 64 MB  → ErrFileTooLarge（HTTP 413）
 //   - 读取/解析失败               → 携带原因的错误（HTTP 500）
 //
-// 性能：单次请求会全量解析文件到第 no 个包（pcapng.Parse 的 limit 参数会提前
-// 停止）；对 427 KB / 915 包量级是毫秒级。按要求不加缓存（记入技术债）。
+// 性能（C2）：packets 表里有 Offset 时只 Seek 到该偏移读 CapLen 字节，
+// 不再全量解析文件；旧数据（Offset=0）退回原有"全量解析"路径并保留 64 MB 上限。
 func (s *Service) PacketDetail(ctx context.Context, captureID string, no int) (*PacketDetail, error) {
 	if no < 1 {
 		return nil, ErrInvalidPacketNo
@@ -92,8 +102,87 @@ func (s *Service) PacketDetail(ctx context.Context, captureID string, no int) (*
 		return nil, err
 	}
 
+	// ★ 越界与"旧数据没有索引"是两回事：
+	//   越界 ⇒ 这个包根本不存在 ⇒ 404；
+	//   旧数据 ⇒ 包存在但 offset=0 ⇒ 退回全量解析。
+	//   否则大文件越界会误报 413（fallback 的大小检查）。
+	if rec.PacketCount > 0 && no > rec.PacketCount {
+		return nil, ErrPacketNotFound
+	}
+
 	path := filepath.Join(s.getDataDir(), rec.FilePath)
 
+	// ★ C2：优先走偏移索引，只读那一个包。旧数据 offset=0 ⇒ 退回全量解析。
+	if pr := s.packetRecordAt(ctx, captureID, no); pr != nil && pr.Offset > 0 && pr.CapLen > 0 {
+		return s.packetDetailByOffset(path, rec, pr, no)
+	}
+	return s.packetDetailByFullParse(path, no)
+}
+
+// packetRecordAt 按 capture_id + no 取单条 PacketRecord 索引；取不到返回 nil。
+//
+// 存储不可用/旧数据没有包索引时返回 nil，由调用方退回全量解析路径，
+// 避免"原文件明明在，却因为索引缺失打不开"。
+func (s *Service) packetRecordAt(ctx context.Context, captureID string, no int) *storage.PacketRecord {
+	res, err := s.db.Packets().ListByCapture(ctx, captureID, storage.Page{Offset: no - 1, Limit: 1})
+	if err != nil || res == nil || len(res.Items) != 1 {
+		return nil
+	}
+	return &res.Items[0]
+}
+
+// packetDetailByOffset 用 packets.offset 定位并只读取一个包的数据。
+func (s *Service) packetDetailByOffset(path string, rec *storage.CaptureRecord, pr *storage.PacketRecord, no int) (*PacketDetail, error) {
+	// ★ 防异常 CapLen（截断/损坏的索引）把内存打满。
+	if pr.CapLen > maxDetailPacketSize {
+		return nil, fmt.Errorf("%w: 单包抓取长度 %d 字节超过 16 MB 上限", ErrFileTooLarge, pr.CapLen)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取抓包文件失败: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(int64(pr.Offset), io.SeekStart); err != nil {
+		return nil, fmt.Errorf("定位包偏移失败（偏移索引可能失效，请重新导入该文件）: %w", err)
+	}
+
+	buf := make([]byte, pr.CapLen)
+	if _, err := io.ReadFull(f, buf); err != nil {
+		// 文件被截断 / offset 与 CapLen 不一致：给出明确原因，绝不 panic。
+		return nil, fmt.Errorf("读取包数据失败（偏移索引可能失效，请重新导入该文件）: %w", err)
+	}
+
+	p := datamodel.NewPacket()
+	p.No = no
+	p.Time = pr.Time
+	if !pr.Time.IsZero() {
+		p.Sec = pr.Time.Unix()
+		p.Usec = int64(pr.Time.Nanosecond() / 1000)
+	}
+	p.CapLen = pr.CapLen
+	p.OrigLen = pr.OrigLen
+	if p.OrigLen <= 0 {
+		p.OrigLen = p.CapLen
+	}
+	p.Data = buf
+	p.Offset = pr.Offset
+
+	linkType := rec.LinkType
+	decoder.Decode(p, linkType)
+	if p.Malformed {
+		// ★ E：偏移指向的字节解不出完整包 ⇒ 索引可能失效，要求重新导入。
+		return nil, fmt.Errorf("偏移索引可能失效（偏移 %d 处的包解码失败），请重新导入该文件", pr.Offset)
+	}
+
+	return detailFromPacket(p, linkType), nil
+}
+
+// packetDetailByFullParse 是旧路径：读取并全量解析到第 no 个包。
+//
+// Offset=0 的旧数据仍走这里；64 MB 上限只在这条路上生效。
+func (s *Service) packetDetailByFullParse(path string, no int) (*PacketDetail, error) {
 	// ★ 先 Stat 再 ReadFile：大于上限时不把文件读进内存。
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -128,8 +217,12 @@ func (s *Service) PacketDetail(ctx context.Context, captureID string, no int) (*
 	// 注意：decoder 的层对象是复用的，这里只在本函数内使用 p，不跨包持有引用。
 	decoder.Decode(p, linkType)
 
-	payloadText, truncated := detailPayload(p)
+	return detailFromPacket(p, linkType), nil
+}
 
+// detailFromPacket 把已解码的 datamodel.Packet 转成响应。
+func detailFromPacket(p *datamodel.Packet, linkType int) *PacketDetail {
+	payloadText, truncated := detailPayload(p)
 	return &PacketDetail{
 		No:               p.No,
 		Time:             p.Time.Format(detailTimeLayout),
@@ -140,7 +233,7 @@ func (s *Service) PacketDetail(ctx context.Context, captureID string, no int) (*
 		Hex:              formatDetailHex(p.Data),
 		PayloadText:      payloadText,
 		PayloadTruncated: truncated,
-	}, nil
+	}
 }
 
 // detailPayload 返回 L7 可读载荷（最多 8 KB），并报告是否发生截断。
