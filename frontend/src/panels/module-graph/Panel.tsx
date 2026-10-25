@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   fetchModuleImpact,
   fetchModulesGraph,
@@ -11,6 +11,8 @@ import {
 } from '../../api'
 import { ConfirmDialog } from '../../shell/ConfirmDialog'
 import { DependencyGraph } from '../../shell/DependencyGraph'
+import { ErrorView, LoadingState } from '../../ui/AsyncState'
+import { StatusPill, type StatusKind } from '../../ui/StatusPill'
 
 /** 先取 impact、再弹确认框的待办动作。stop=true 表示“停用”，false 表示“启用”。 */
 interface PendingAction {
@@ -168,19 +170,17 @@ export function ModuleGraphPanel() {
   }
 
   if (loading) {
-    return <div className="p-4 text-dim">加载模块拓扑…</div>
+    return (
+      <div className="flex h-full flex-col justify-center">
+        <LoadingState label="加载模块拓扑…" />
+      </div>
+    )
   }
 
   if (error) {
     return (
-      <div className="flex flex-col items-start gap-3 p-4">
-        <div className="text-danger">{error}</div>
-        <button
-          className="rounded-sm bg-accent px-3 py-1.5 text-base text-accent-fg hover:opacity-90"
-          onClick={() => setReloadKey((k) => k + 1)}
-        >
-          重试
-        </button>
+      <div className="flex h-full flex-col justify-center">
+        <ErrorView error={error} onRetry={() => setReloadKey((k) => k + 1)} />
       </div>
     )
   }
@@ -296,7 +296,10 @@ function NodeDetail({ node }: { node: GraphNode }) {
       <DetailRow label="层" value={node.layer} />
       <DetailRow label="core" value={String(node.core)} />
       <DetailRow label="enabled" value={String(node.enabled)} />
-      <DetailRow label="state" value={node.state} />
+      <DetailRow
+        label="state"
+        value={<StatusPill kind={moduleStateKind(node.state)} label={node.state || '-'} />}
+      />
       <DetailRow label="provides" value={provides} />
       <DetailRow label="injects" value={injects} />
       <DetailRow label="http_base" value={node.http_base || '-'} />
@@ -314,7 +317,19 @@ function NodeDetail({ node }: { node: GraphNode }) {
   )
 }
 
-function DetailRow({ label, value }: { label: string; value: string }) {
+/** 模块运行状态 → 标签色（started=ok / error=danger / 其余=dim）。 */
+function moduleStateKind(state: string): StatusKind {
+  switch (state) {
+    case 'started':
+      return 'ok'
+    case 'error':
+      return 'danger'
+    default:
+      return 'dim'
+  }
+}
+
+function DetailRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="flex gap-2">
       <span className="w-20 shrink-0 text-dim">{label}</span>

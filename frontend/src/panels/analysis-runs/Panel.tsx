@@ -8,6 +8,9 @@ import {
   type RunRecord,
 } from '../../api'
 import { useEvidenceId, useEvidenceSelect } from '../../shell/evidence'
+import { EmptyState, ErrorView, LoadingState } from '../../ui/AsyncState'
+import { StatusPill, type StatusKind } from '../../ui/StatusPill'
+import { formatBytes, formatDuration } from '../../ui/format'
 
 /** 轮询间隔：仅当存在 running 任务时生效。 */
 const POLL_INTERVAL_MS = 2000
@@ -24,27 +27,28 @@ function errText(e: unknown): string {
   return String(e)
 }
 
-/** 文件大小的人类可读形式（B/KB/MB）。 */
-function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return '0 B'
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / 1024 / 1024).toFixed(1)} MB`
-}
-
-/** 状态标签 + 颜色令牌工具类（一律 var(--…)，不硬编码颜色）。 */
-function statusOf(run: RunRecord | undefined): { label: string; className: string } {
-  if (!run) return { label: '未分析', className: 'text-dim' }
+/** 运行状态 → 状态标签（颜色由 StatusPill 的语义令牌决定，不硬编码颜色）。 */
+function statusOf(run: RunRecord | undefined): { label: string; kind: StatusKind } {
+  if (!run) return { label: '未分析', kind: 'dim' }
   switch (run.state) {
     case 'running':
-      return { label: '分析中', className: 'text-accent' }
+      return { label: '分析中', kind: 'info' }
     case 'done':
-      return { label: '完成', className: 'text-ok' }
+      return { label: '完成', kind: 'ok' }
     case 'error':
-      return { label: '失败', className: 'text-danger' }
+      return { label: '失败', kind: 'danger' }
     default:
-      return { label: run.state || '-', className: 'text-dim' }
+      return { label: run.state || '-', kind: 'dim' }
   }
+}
+
+/** 运行耗时（ms）；running / Go 零值 finished / 非法时间 ⇒ null（耗时未知）。 */
+function runDurationMs(run: RunRecord | undefined): number | null {
+  if (!run || !run.started || !run.finished) return null
+  const start = Date.parse(run.started)
+  const end = Date.parse(run.finished)
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null
+  return end - start
 }
 
 /** a 是否比 b 更新（started 相同时用 id 兜底，避免不稳定排序）。 */
@@ -73,6 +77,7 @@ export function AnalysisRunsPanel() {
 
   const [captures, setCaptures] = useState<CaptureRecord[]>([])
   const [runs, setRuns] = useState<RunRecord[]>([])
+  const [loading, setLoading] = useState(true)
   const [capturesError, setCapturesError] = useState('')
   const [runsError, setRunsError] = useState('')
   const [creatingId, setCreatingId] = useState<string | null>(null)
@@ -104,10 +109,16 @@ export function AnalysisRunsPanel() {
     }
   }, [])
 
-  // 首次加载：captures 与 runs 并行拉取。
+  // 首次加载：captures 与 runs 并行拉取；两路都落地后退出加载态。
   useEffect(() => {
-    void loadCaptures()
-    void refreshRuns()
+    let cancelled = false
+    setLoading(true)
+    Promise.all([loadCaptures(), refreshRuns()]).finally(() => {
+      if (!cancelled) setLoading(false)
+    })
+    return () => {
+      cancelled = true
+    }
   }, [loadCaptures, refreshRuns])
 
   // 按 capture_id 分组，每组取 started 最新的一条（显式取最新，不依赖后端顺序）。
@@ -170,7 +181,7 @@ export function AnalysisRunsPanel() {
           )}
         </div>
 
-        {loadError && <div className="sev-danger">{loadError}</div>}
+        {loadError && <ErrorView error={loadError} />}
 
         <div className="panel-surface overflow-auto">
           <table>
@@ -185,16 +196,30 @@ export function AnalysisRunsPanel() {
               </tr>
             </thead>
             <tbody>
-              {captures.length === 0 ? (
+              {loading ? (
                 <tr>
-                  <td colSpan={6} className="text-dim">
-                    {EMPTY_CAPTURES_MESSAGE}
+                  <td colSpan={6}>
+                    <LoadingState label="加载分析任务…" />
+                  </td>
+                </tr>
+              ) : captures.length === 0 ? (
+                <tr>
+                  <td colSpan={6}>
+                    <EmptyState>{EMPTY_CAPTURES_MESSAGE}</EmptyState>
                   </td>
                 </tr>
               ) : (
                 captures.map((c) => {
                   const run = latestByCapture.get(c.id)
                   const status = statusOf(run)
+                  const duration = runDurationMs(run)
+                  const statusTitle = [
+                    status.label,
+                    run?.err,
+                    duration !== null ? `耗时 ${formatDuration(duration)}` : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')
                   const busy = creatingId === c.id
                   const rowError = rowErrors[c.id]
                   const selected = c.id === evidenceId
@@ -216,8 +241,15 @@ export function AnalysisRunsPanel() {
                       </td>
                       <td className="tabular-nums">{c.packet_count}</td>
                       <td className="tabular-nums">{formatBytes(c.byte_size)}</td>
-                      <td className={`whitespace-nowrap ${status.className}`} title={run?.err || status.label}>
-                        {status.label}
+                      <td className="whitespace-nowrap" title={statusTitle}>
+                        <div className="flex items-center gap-2">
+                          <StatusPill kind={status.kind} label={status.label} />
+                          {duration !== null && (
+                            <span className="tabular-nums text-xs text-dim">
+                              {formatDuration(duration)}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="tabular-nums">{run ? run.alerts : '—'}</td>
                       <td>

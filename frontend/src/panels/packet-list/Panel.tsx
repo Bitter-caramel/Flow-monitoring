@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { listPackets, type PacketRecord } from '../../api'
 import { useEvidenceCapture, useEvidenceId } from '../../shell/evidence'
 import { PacketDetail, type PacketRef } from '../../shell/PacketDetail'
+import { EmptyState, ErrorView, LoadingState } from '../../ui/AsyncState'
+import { Pagination } from '../../ui/Pagination'
 
 // 行内只显示 HH:MM:SS（本地时区，主信息），毫秒用淡色后缀单独渲染，
 // 避免每天/每条都重复年月日；完整 ISO 仍放在单元格 title 里（悬停可看）。
@@ -60,6 +62,7 @@ export function PacketListPanel() {
   const [offset, setOffset] = useState(0)
   const [pageSize, setPageSize] = useState(50)
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
   // 当前点开的包（抽屉数据源）；null = 抽屉关闭。
   const [selected, setSelected] = useState<PacketRef | null>(null)
 
@@ -74,28 +77,30 @@ export function PacketListPanel() {
     if (!captureId) {
       setPackets([])
       setTotal(0)
+      setLoading(false)
       return
     }
     let cancelled = false
+    setLoading(true)
     listPackets(captureId, offset, pageSize)
       .then((res) => {
         if (cancelled) return
         setPackets(res.items)
         setTotal(res.total)
         setError('')
+        setLoading(false)
       })
       .catch((e) => {
         if (cancelled) return
         setError(String(e))
+        setLoading(false)
       })
     return () => {
       cancelled = true
     }
   }, [captureId, offset, pageSize])
 
-  const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const currentPage = Math.floor(offset / pageSize) + 1
-  const atLastPage = offset + pageSize >= total
 
   // 当前 capture 的时间范围（后端 first_seen/last_seen；缺失则整段不渲染）。
   const timeRange = currentCapture
@@ -114,8 +119,8 @@ export function PacketListPanel() {
         <div className="flex shrink-0 items-baseline gap-2">
           <h2 className="text-lg font-semibold">包列表</h2>
         </div>
-        <div className="flex flex-1 items-center justify-center panel-surface text-dim">
-          请先选择证据包
+        <div className="flex flex-1 flex-col panel-surface">
+          <EmptyState className="flex-1">请先选择证据包</EmptyState>
         </div>
       </div>
     )
@@ -128,9 +133,7 @@ export function PacketListPanel() {
         {currentCapture && (
           <span className="text-sm text-dim">· {currentCapture.name}</span>
         )}
-        <span className="text-sm text-dim">
-          共 {total} 包 · 第 {currentPage}/{totalPages} 页
-        </span>
+        <span className="text-sm text-dim">共 {total} 包</span>
         {timeRange && (
           <span className="text-sm text-dim">
             · 时间范围 <span className="mono">{timeRange}</span>
@@ -138,7 +141,7 @@ export function PacketListPanel() {
         )}
       </div>
 
-      {error && <div className="sev-danger shrink-0">{error}</div>}
+      {error && <ErrorView error={error} className="shrink-0" />}
 
       <div className="flex-1 overflow-auto min-h-0 panel-surface">
         <table>
@@ -154,10 +157,16 @@ export function PacketListPanel() {
             </tr>
           </thead>
           <tbody>
-            {packets.length === 0 ? (
+            {loading ? (
               <tr>
-                <td colSpan={7} className="text-dim">
-                  无数据
+                <td colSpan={7}>
+                  <LoadingState label="加载包列表…" />
+                </td>
+              </tr>
+            ) : packets.length === 0 ? (
+              <tr>
+                <td colSpan={7}>
+                  <EmptyState>无数据</EmptyState>
                 </td>
               </tr>
             ) : (
@@ -207,36 +216,12 @@ export function PacketListPanel() {
       </div>
 
       <div className="sticky bottom-0 z-10 flex items-center justify-between gap-2 border-t border-subtle bg-panel px-3 py-2">
-        <div className="flex items-center gap-2">
-          <button
-            className="rounded-sm bg-accent px-3 py-1.5 text-base text-accent-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={offset === 0}
-            onClick={() => setOffset(0)}
-          >
-            首页
-          </button>
-          <button
-            className="rounded-sm bg-accent px-3 py-1.5 text-base text-accent-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={offset === 0}
-            onClick={() => setOffset(Math.max(0, offset - pageSize))}
-          >
-            上一页
-          </button>
-          <button
-            className="rounded-sm bg-accent px-3 py-1.5 text-base text-accent-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={atLastPage}
-            onClick={() => setOffset(offset + pageSize)}
-          >
-            下一页
-          </button>
-          <button
-            className="rounded-sm bg-accent px-3 py-1.5 text-base text-accent-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={atLastPage}
-            onClick={() => setOffset(Math.max(0, (totalPages - 1) * pageSize))}
-          >
-            末页
-          </button>
-        </div>
+        <Pagination
+          page={currentPage}
+          pageSize={pageSize}
+          total={total}
+          onChange={(p) => setOffset((p - 1) * pageSize)}
+        />
 
         <label className="flex items-center gap-1 text-sm text-dim">
           每页

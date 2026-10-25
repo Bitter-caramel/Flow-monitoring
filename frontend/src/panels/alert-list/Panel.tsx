@@ -3,6 +3,9 @@ import { fetchAlerts, type AlertRecord } from './api'
 import { useWorkbench } from '../../shell/workbench'
 import { useEvidenceId } from '../../shell/evidence'
 import { PacketDetail, type PacketRef } from '../../shell/PacketDetail'
+import { EmptyState, ErrorView, LoadingState } from '../../ui/AsyncState'
+import { StatusPill, type StatusKind } from '../../ui/StatusPill'
+import { formatTime } from '../../ui/format'
 
 /** 前端最多保留的告警条数（防无限增长；按告警而非事件计数）。 */
 const MAX_ALERTS = 500
@@ -229,22 +232,22 @@ function severityClass(severity: string): string {
   }
 }
 
-/** HH:MM:SS（本地时区）；无法解析时回退原串，绝不显示 "null"。 */
-function fmtClock(iso: string): string {
-  if (!iso) return '-'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  const p2 = (n: number) => String(n).padStart(2, '0')
-  return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
-}
-
-/** MM-DD；无法解析时返回空串（调用方不渲染日期段）。 */
-function fmtDay(iso: string): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  const p2 = (n: number) => String(n).padStart(2, '0')
-  return `${p2(d.getMonth() + 1)}-${p2(d.getDate())}`
+/** 严重度 → 标签种类（颜色由 StatusPill 的语义令牌决定，不硬编码颜色）。 */
+function severityKind(severity: string): StatusKind {
+  switch (severity.trim().toLowerCase()) {
+    case 'critical':
+    case 'high':
+      return 'danger'
+    case 'medium':
+    case 'warn':
+    case 'warning':
+      return 'warn'
+    case 'low':
+    case 'info':
+      return 'ok'
+    default:
+      return 'dim'
+  }
 }
 
 function formatEndpoint(ip: string, port: number): string {
@@ -281,6 +284,7 @@ export function AlertListPanel() {
   const [events, setEvents] = useState<AlertEvent[]>([])
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
   // 当前点开的告警包（同一个共享抽屉）；null = 关闭。
   const [selected, setSelected] = useState<PacketRef | null>(null)
   // 展开状态以聚合键（run_id+pkt_no）为 key，避免分页刷新后错位。
@@ -325,6 +329,7 @@ export function AlertListPanel() {
       setExpanded(new Set())
       setConnected(false)
       setError('')
+      setLoading(false)
       return
     }
 
@@ -425,14 +430,18 @@ export function AlertListPanel() {
 
     // 首次加载：先拉历史，再连 WS（连上后还会按 since_id 补一次增量）。
     ;(async () => {
+      setLoading(true)
       try {
         const page = await fetchAlerts(1, HISTORY_PAGE_SIZE, 0, mode, captureId)
         if (!cancelled) applyIncoming(page.items)
       } catch (e) {
         if (!cancelled) setError(String(e))
       } finally {
-        // 只有动态工作台才连 WS；静态工作台只做一次性拉取。
-        if (!cancelled && isLive) connect()
+        if (!cancelled) {
+          setLoading(false)
+          // 只有动态工作台才连 WS；静态工作台只做一次性拉取。
+          if (isLive) connect()
+        }
       }
     })()
 
@@ -463,8 +472,8 @@ export function AlertListPanel() {
       <div className="flex shrink-0 flex-wrap items-baseline gap-3">
         <h2 className="text-lg font-semibold">{wb === 'live' ? '实时告警' : '告警'}</h2>
         {isLive && (
-          <span className={connected ? 'text-ok' : 'text-warn'} title={connected ? 'WebSocket 已连接' : 'WebSocket 重连中'}>
-            {connected ? '● 已连接' : '○ 重连中'}
+          <span title={connected ? 'WebSocket 已连接' : 'WebSocket 重连中'}>
+            <StatusPill kind={connected ? 'ok' : 'warn'} label={connected ? '已连接' : '重连中'} />
           </span>
         )}
         <span className="text-sm text-dim">
@@ -482,11 +491,11 @@ export function AlertListPanel() {
         </button>
       </div>
 
-      {error && <div className="sev-danger shrink-0">{error}</div>}
+      {error && <ErrorView error={error} className="shrink-0" />}
 
       {needsEvidence ? (
-        <div className="flex flex-1 items-center justify-center panel-surface text-dim">
-          请先选择证据包
+        <div className="flex flex-1 flex-col panel-surface">
+          <EmptyState className="flex-1">请先选择证据包</EmptyState>
         </div>
       ) : (
         <div className="flex-1 overflow-auto min-h-0 panel-surface">
@@ -503,10 +512,16 @@ export function AlertListPanel() {
               </tr>
             </thead>
             <tbody>
-              {events.length === 0 ? (
+              {loading && events.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="text-dim">
-                    暂无告警
+                  <td colSpan={7}>
+                    <LoadingState label="加载告警…" />
+                  </td>
+                </tr>
+              ) : events.length === 0 ? (
+                <tr>
+                  <td colSpan={7}>
+                    <EmptyState>暂无告警</EmptyState>
                   </td>
                 </tr>
               ) : (
@@ -539,7 +554,7 @@ export function AlertListPanel() {
                           </button>
                         </td>
                         <td className="mono tabular-nums whitespace-nowrap" title={ev.time}>
-                          {ev.time ? `${fmtDay(ev.time)} ${fmtClock(ev.time)}` : '-'}
+                          {ev.time ? formatTime(ev.time) : '-'}
                         </td>
                         <td className="mono whitespace-nowrap">
                           {formatEndpoint(ev.srcIp, ev.srcPort)} →{' '}
@@ -547,8 +562,8 @@ export function AlertListPanel() {
                         </td>
                         <td className="whitespace-nowrap">{ev.proto || '-'}</td>
                         <td className="whitespace-nowrap">命中 {hitCount} 条规则</td>
-                        <td className={`whitespace-nowrap ${severityClass(ev.severity)}`}>
-                          {ev.severity || '-'}
+                        <td className="whitespace-nowrap">
+                          <StatusPill kind={severityKind(ev.severity)} label={ev.severity || '-'} />
                         </td>
                         <td>
                           {/* title 放在包一层的 span 上：禁用按钮上部分浏览器不弹 title。 */}
