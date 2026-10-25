@@ -206,10 +206,17 @@ func Bootstrap(cfg *config.Config, logger *logging.Logger, logFile *os.File) (*A
 
 	// 宿主侧 alerting（任务 15-2b）：只订阅事件总线，不加载规则、不跑热路径。
 	// ★ 只追加/替换装配，不改既有模块启动顺序；解析失败由 Service 内部计数 + 日志。
+	// C1：有库时告警全量入库、/api/alerts 改查库；无库时保持纯内存 + JSONL 回填。
+	restorePath := cfg.Alert.SinkPath
+	if db != nil {
+		// 历史由库恢复，不再回填 JSONL（避免内存自增 id 与库 BIGSERIAL 冲突）。
+		restorePath = ""
+	}
 	alerts := alerting.New(alerting.Config{
 		Capacity:    cfg.Detect.AlertBuffer,
 		Logger:      logger.Logger,
-		RestorePath: cfg.Alert.SinkPath,
+		Store:       db,
+		RestorePath: restorePath,
 	})
 	alerts.Register(ts)
 

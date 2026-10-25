@@ -17,11 +17,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"flow-monitoring/internal/kernel/alerting"
 	"flow-monitoring/internal/kernel/storage"
 	"flow-monitoring/pkg/plugin"
 )
@@ -379,4 +381,177 @@ func (p *Postgres) RunList(ctx context.Context, limit int) ([]plugin.RunRecord, 
 		items = append(items, rec)
 	}
 	return items, rows.Err()
+}
+
+// —— 任务 C1：告警全量入库（单表全量） ——
+//
+// 这两个方法让 *Postgres 满足 alerting.AlertStore（消费者侧定义的接口）。
+// 不做成分表（D0 才做），只做单表全量 + 批量写 + 查库。
+
+// alertColumns 是 alerts 表的读取列（顺序与 scanAlertRow 一一对应）。
+//
+// ★ "offset" 是 SQL 保留字，必须加双引号。
+const alertColumns = `id, rule_id, name, severity, weight, time, src_ip, src_port, dst_ip, dst_port, proto, stream_id, pkt_no, buffer, "offset", snippet, run_id, mode, capture_id`
+
+// 编译期断言：*Postgres 满足 alerting 的告警持久化契约（AlertStore）。
+//
+// ★ 界面定义在 alerting（消费者侧），store 作为实现方在此声明，改动签名会立刻编译失败。
+var _ alerting.AlertStore = (*Postgres)(nil)
+
+// alertTimeValue 把告警的 RFC3339 字符串转成 time.Time（供 timestamptz 写入）。
+//
+// ★ time 列 NOT NULL：解析失败时退回当前时间，保证不因个别坏值整批失败。
+func alertTimeValue(s string) time.Time {
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t
+	}
+	return time.Now().UTC()
+}
+
+// InsertAlerts 批量插入告警，按输入顺序返回库分配的 BIGSERIAL id。
+//
+// ★ 必须是单条 INSERT ... RETURNING：失败时一行都不会插入，上层重试不会重复。
+// ★ 多行 VALUES 保证 RETURNING 顺序与输入顺序一致（每行 18 个占位符，200 行也远低于参数上限）。
+func (p *Postgres) InsertAlerts(ctx context.Context, alerts []alerting.Alert) ([]uint64, error) {
+	if len(alerts) == 0 {
+		return nil, nil
+	}
+
+	const colsPerRow = 18
+	var sb strings.Builder
+	sb.WriteString(`INSERT INTO alerts (rule_id, name, severity, weight, time, src_ip, src_port, dst_ip, dst_port, proto, stream_id, pkt_no, buffer, "offset", snippet, run_id, mode, capture_id) VALUES `)
+	args := make([]any, 0, len(alerts)*colsPerRow)
+	for i, a := range alerts {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		base := i * colsPerRow
+		sb.WriteByte('(')
+		for j := 0; j < colsPerRow; j++ {
+			if j > 0 {
+				sb.WriteByte(',')
+			}
+			fmt.Fprintf(&sb, "$%d", base+j+1)
+		}
+		sb.WriteByte(')')
+		args = append(args,
+			a.RuleID, a.Name, a.Severity, a.Weight, alertTimeValue(a.Time),
+			a.SrcIP, int(a.SrcPort), a.DstIP, int(a.DstPort), a.Proto,
+			a.StreamID, a.PktNo, a.Buffer, a.Offset, a.Snippet,
+			a.RunID, a.Mode, a.CaptureID,
+		)
+	}
+	sb.WriteString(` RETURNING id`)
+
+	rows, err := p.pool.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: insert alerts: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]uint64, 0, len(alerts))
+	for rows.Next() {
+		var id uint64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: scan alert id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: insert alerts rows: %w", err)
+	}
+	if len(ids) != len(alerts) {
+		return ids, fmt.Errorf("store: insert alerts 返回 id 数量 %d != 告警数量 %d", len(ids), len(alerts))
+	}
+	return ids, nil
+}
+
+// QueryAlerts 按过滤条件分页查询告警（ORDER BY id ASC），返回 items 与过滤后总数。
+//
+// ★ total 是「经过 since_id + mode/run_id/capture_id 过滤后的总数」，不是全表行数。
+// ★ items 永远是 non-nil 切片（空结果返回 []，避免 JSON 序列化成 null）。
+func (p *Postgres) QueryAlerts(ctx context.Context, q alerting.AlertQuery) ([]alerting.Alert, int, error) {
+	var conds []string
+	var args []any
+	addCond := func(expr string, v any) {
+		args = append(args, v)
+		conds = append(conds, fmt.Sprintf(expr, len(args)))
+	}
+	if q.SinceID > 0 {
+		addCond("id > $%d", int64(q.SinceID))
+	}
+	if q.Mode != "" {
+		addCond("mode = $%d", q.Mode)
+	}
+	if q.RunID != "" {
+		addCond("run_id = $%d", q.RunID)
+	}
+	if q.CaptureID != "" {
+		addCond("capture_id = $%d", q.CaptureID)
+	}
+	where := ""
+	if len(conds) > 0 {
+		where = " WHERE " + strings.Join(conds, " AND ")
+	}
+
+	var total int
+	if err := p.pool.QueryRow(ctx, "SELECT count(*) FROM alerts"+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("store: count alerts: %w", err)
+	}
+
+	page, pageSize := q.Page, q.PageSize
+	if page < 1 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = alerting.DefaultPageSize
+	}
+	if pageSize > alerting.MaxPageSize {
+		pageSize = alerting.MaxPageSize
+	}
+	offset := (page - 1) * pageSize
+
+	pageArgs := append(append([]any{}, args...), pageSize, offset)
+	limitPh := len(args) + 1
+	offsetPh := len(args) + 2
+	sql := "SELECT " + alertColumns + " FROM alerts" + where +
+		fmt.Sprintf(" ORDER BY id ASC LIMIT $%d OFFSET $%d", limitPh, offsetPh)
+
+	rows, err := p.pool.Query(ctx, sql, pageArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("store: query alerts: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]alerting.Alert, 0, pageSize)
+	for rows.Next() {
+		a, err := scanAlertRow(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		items = append(items, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("store: query alerts rows: %w", err)
+	}
+	return items, total, nil
+}
+
+// scanAlertRow 把一行 alerts 读进 alerting.Alert（time 统一格式化为 UTC RFC3339Nano）。
+func scanAlertRow(rows pgx.Rows) (alerting.Alert, error) {
+	var a alerting.Alert
+	var ts time.Time
+	var srcPort, dstPort int
+	if err := rows.Scan(
+		&a.ID, &a.RuleID, &a.Name, &a.Severity, &a.Weight, &ts,
+		&a.SrcIP, &srcPort, &a.DstIP, &dstPort, &a.Proto,
+		&a.StreamID, &a.PktNo, &a.Buffer, &a.Offset, &a.Snippet,
+		&a.RunID, &a.Mode, &a.CaptureID,
+	); err != nil {
+		return alerting.Alert{}, fmt.Errorf("store: scan alert: %w", err)
+	}
+	a.SrcPort = uint16(srcPort)
+	a.DstPort = uint16(dstPort)
+	a.Time = ts.UTC().Format(time.RFC3339Nano)
+	return a, nil
 }

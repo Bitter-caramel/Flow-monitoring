@@ -73,6 +73,10 @@ func newRing(capacity int) *ring {
 }
 
 // add 分配新 ID、写入缓冲；满容量时淘汰最旧一条。
+//
+// ★ 仅在「内存模式」（Store == nil）或 JSONL 回填时使用：ID 由 ring 自增分配。
+//
+//	有库时必须以 DB 的 BIGSERIAL 为准，走 addWithID（见下）。
 func (r *ring) add(a Alert) Alert {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -80,7 +84,26 @@ func (r *ring) add(a Alert) Alert {
 	rec := a
 	rec.ID = r.nextID
 	r.nextID++
+	return r.insertLocked(rec)
+}
 
+// addWithID 使用调用方给定的 ID 写入缓冲（ID 来自 DB 的 BIGSERIAL）。
+//
+// ★ 关键：内存与库必须共用同一个 ID，否则前端 since_id 增量拉取会错乱。
+//
+//	同时把 nextID 推到 max(nextID, id+1)，保证后续（若有）自增分配不会撞号。
+func (r *ring) addWithID(a Alert) Alert {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if a.ID >= r.nextID {
+		r.nextID = a.ID + 1
+	}
+	return r.insertLocked(a)
+}
+
+// insertLocked 在已持锁的前提下写入一条记录（满容量淘汰最旧）。
+func (r *ring) insertLocked(rec Alert) Alert {
 	if len(r.items) >= r.cap {
 		// 淘汰最旧：整体左移一格，新记录写进末尾。
 		copy(r.items, r.items[1:])
@@ -105,15 +128,7 @@ func (r *ring) query(page, pageSize int, sinceID uint64, f Filter) Page {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if page < 1 {
-		page = 1
-	}
-	if pageSize <= 0 {
-		pageSize = DefaultPageSize
-	}
-	if pageSize > MaxPageSize {
-		pageSize = MaxPageSize
-	}
+	page, pageSize = normalizePage(page, pageSize)
 
 	filtered := make([]Alert, 0, len(r.items))
 	for _, it := range r.items {

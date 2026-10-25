@@ -54,3 +54,34 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_started ON runs (started DESC);
+
+-- C1：告警全量入库（单表全量，不做分表）。
+-- ★ id 用 BIGSERIAL：库分配的 id 是唯一 ID，宿主内存环形缓冲回填同一个 id，
+--   保证前端 since_id 增量拉取不会错乱。
+-- ★ "offset" 是 SQL 保留字，必须加双引号，否则 CREATE/SELECT 都会语法错误。
+CREATE TABLE IF NOT EXISTS alerts (
+    id         BIGSERIAL PRIMARY KEY,
+    rule_id    TEXT NOT NULL,
+    name       TEXT NOT NULL DEFAULT '',
+    severity   TEXT NOT NULL DEFAULT '',
+    weight     INT  NOT NULL DEFAULT 0,
+    time       TIMESTAMPTZ NOT NULL,
+    src_ip     TEXT NOT NULL DEFAULT '',
+    src_port   INT  NOT NULL DEFAULT 0,
+    dst_ip     TEXT NOT NULL DEFAULT '',
+    dst_port   INT  NOT NULL DEFAULT 0,
+    proto      TEXT NOT NULL DEFAULT '',
+    stream_id  INT  NOT NULL DEFAULT 0,
+    pkt_no     INT  NOT NULL DEFAULT 0,
+    buffer     TEXT NOT NULL DEFAULT '',
+    "offset"   INT  NOT NULL DEFAULT 0,
+    snippet    TEXT NOT NULL DEFAULT '',
+    run_id     TEXT NOT NULL DEFAULT '',
+    mode       TEXT NOT NULL DEFAULT '',
+    capture_id TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_time       ON alerts (time DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_alerts_run        ON alerts (run_id, id);
+CREATE INDEX IF NOT EXISTS idx_alerts_capture    ON alerts (capture_id, id);
+CREATE INDEX IF NOT EXISTS idx_alerts_mode_time  ON alerts (mode, time DESC);

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"flow-monitoring/internal/kernel/eventbus"
+	"flow-monitoring/internal/kernel/storage"
 )
 
 // DefaultPushBuffer 是 OnAlert 派发通道的默认缓冲容量（Config.PushBuffer <= 0 时使用）。
@@ -23,6 +24,48 @@ import (
 //	所以告警消费循环只能"投递到通道就返回"，缓冲满时丢弃并计数，绝不反压消费。
 const DefaultPushBuffer = 256
 
+// 告警批量落库参数（任务 C1）。
+const (
+	// persistQueueSize 是待写队列（有界通道）容量。
+	// ★ 队列满时 enqueue 阻塞（反压到事件消费循环）：宁可慢，不可丢。
+	persistQueueSize = 4096
+	// flushBatchSize 是单个 INSERT 批次上限（满则立即刷）。
+	flushBatchSize = 200
+	// flushInterval 是"攒批"最长等待时间（先到者：满 200 条或满 100ms）。
+	flushInterval = 100 * time.Millisecond
+	// persistRetryDelay 是批次写入失败后的重试间隔。
+	persistRetryDelay = 50 * time.Millisecond
+)
+
+// AlertQuery 是查库查询条件（Store != nil 时 /api/alerts 走这里）。
+//
+// ★ 空字符串表示"不按该字段过滤"；SinceID>0 表示只取 id > SinceID 的记录。
+type AlertQuery struct {
+	Page      int
+	PageSize  int
+	SinceID   uint64
+	Mode      string
+	RunID     string
+	CaptureID string
+}
+
+// AlertStore 是 alerting 的**可选持久化能力**（由 internal/modules/store.Postgres 实现）。
+//
+// ★ 接口定义在消费者侧：alerting 只依赖这个最小契约，绝不 import internal/modules/**，
+//
+//	保持内核纯净性（purity_test.go）。Store == nil 或实现不满足该接口时退回内存模式。
+//
+// ★ 为什么以 DB 的 BIGSERIAL 为唯一 ID：内存自增 ID 与库 ID 必须二选一，否则前端
+//
+//	since_id 增量会错乱。InsertAlerts 返回的 id 会被回填到 Alert 后再进环形缓冲。
+type AlertStore interface {
+	// InsertAlerts 批量插入告警，按输入顺序返回库分配的 id。
+	// ★ 必须是单条原子 INSERT（失败则一行都没插入），这样上层重试不会重复插入。
+	InsertAlerts(ctx context.Context, alerts []Alert) ([]uint64, error)
+	// QueryAlerts 按过滤条件分页查询（ORDER BY id ASC），返回 items 与过滤后总数。
+	QueryAlerts(ctx context.Context, q AlertQuery) ([]Alert, int, error)
+}
+
 // Config 是 alerting 服务的装配配置。
 type Config struct {
 	// Capacity 是环形缓冲容量（沿用 config.Detect.AlertBuffer；<=0 用默认值）。
@@ -31,8 +74,12 @@ type Config struct {
 	Logger *slog.Logger
 	// PushBuffer 是 OnAlert 派发通道的缓冲容量（<=0 用 DefaultPushBuffer）。
 	PushBuffer int
+	// Store 是进程内存储聚合接口（nil 表示不持久化，退回纯内存模式）。
+	// ★ 只依赖 internal/kernel/storage.Storage 接口；实际告警读写能力经 AlertStore 探测。
+	Store storage.Storage
 	// RestorePath 是启动时回填告警的 JSONL 归档路径（空 = 不回填）。
 	// ★ 与 alert 模块的 alert.sink_path 指向同一文件；不存在时静默跳过。
+	// ★ 有库（Store != nil）时应留空：历史由库恢复，避免内存自增 id 与库 id 冲突。
 	RestorePath string
 }
 
@@ -41,8 +88,10 @@ type Config struct {
 // ★ 15-2b 起宿主不再加载规则、也不再跑回放：rules_total / rules_by_source /
 // replay 这些它不知道的信息被移除，留着就是撒谎。
 type Stats struct {
-	Enabled     bool   `json:"enabled"`
-	AlertsTotal int    `json:"alerts_total"`
+	Enabled     bool `json:"enabled"`
+	AlertsTotal int  `json:"alerts_total"`
+	// BufferTotal 是环形缓冲（热层）里的条数；有库时 AlertsTotal 报的是库总数。
+	BufferTotal int    `json:"buffer_total"`
 	Capacity    int    `json:"capacity"`
 	Received    uint64 `json:"received"`
 	Dropped     uint64 `json:"dropped"`
@@ -58,6 +107,15 @@ type Stats struct {
 
 	// Restored 是启动时从 JSONL 归档回填的告警条数（不计入 Received）。
 	Restored int `json:"restored"`
+
+	// Persisted 是成功写入 PG 的告警条数（C1）。
+	Persisted uint64 `json:"persisted"`
+	// PersistErrors 是批量写入失败（含重试）的累计次数。
+	PersistErrors uint64 `json:"persist_errors"`
+	// Pending 是待写队列当前积压条数（不含正在写的那一批）。
+	Pending int `json:"pending"`
+	// PersistBackpressure 是待写队列满、消费循环被迫阻塞的累计次数。
+	PersistBackpressure uint64 `json:"persist_backpressure"`
 }
 
 // Service 只订阅 detect.feature 事件并缓存告警，不加载规则、不跑热路径。
@@ -84,6 +142,21 @@ type Service struct {
 	pushCh chan Alert
 	// pushDropped 是派发通道满时丢弃的条数（受 mu 保护）。
 	pushDropped uint64
+
+	// —— 任务 C1：批量落库 ——
+	// alertStore 是告警持久化能力（nil ⇒ 纯内存模式；构造后不变）。
+	alertStore AlertStore
+	// persistCh 是有界待写队列；enqueue 满时阻塞，persistLoop 消费。
+	persistCh chan Alert
+	// persistQuit 关闭后 persistLoop 排空剩余队列并退出。
+	persistQuit chan struct{}
+	// persistStopOnce 保证 persistQuit 只关闭一次（Stop 幂等）。
+	persistStopOnce sync.Once
+	persistWG       sync.WaitGroup
+	// persisted / persistErrors / backpressure 受 mu 保护。
+	persisted     uint64
+	persistErrors uint64
+	backpressure  uint64
 }
 
 // New 创建 alerting 服务（只装配环形缓冲与日志器，不启动订阅）。
@@ -105,6 +178,14 @@ func New(cfg Config) *Service {
 		logger:  logger,
 		pushBuf: pushBuf,
 	}
+	// C1：探测存储是否提供告警持久化能力（nil / 不支持 ⇒ 纯内存模式，向后兼容）。
+	if cfg.Store != nil {
+		if as, ok := cfg.Store.(AlertStore); ok {
+			s.alertStore = as
+		} else {
+			logger.Warn("alerting: 存储实现未提供告警持久化能力，退回内存模式")
+		}
+	}
 	if cfg.RestorePath != "" {
 		n, err := s.RestoreFromFile(cfg.RestorePath)
 		switch {
@@ -115,6 +196,10 @@ func New(cfg Config) *Service {
 			logger.Info("alerting: 已从告警归档回填",
 				"path", cfg.RestorePath, "restored", n)
 		}
+	}
+	// 有库时启动后台批量落库 goroutine（Stop 会排空剩余队列再退出）。
+	if s.alertStore != nil {
+		s.startPersist()
 	}
 	return s
 }
@@ -348,23 +433,77 @@ func (s *Service) Stop() {
 	s.bus = nil
 	s.mu.Unlock()
 
-	if cancel == nil { // 已停止
-		return
+	if cancel != nil {
+		cancel()
+		// ★ 先等消费 goroutine 退出（不再 enqueue），再停落库 goroutine：
+		//   排空期间不会再有新的入队者，避免 send-on-closed / 丢数据。
+		s.wg.Wait()
+		// 成对调用：订阅的 channel 必须显式关闭，避免订阅表泄漏。
+		if bus != nil && sub != nil {
+			bus.Unsubscribe(sub)
+		}
 	}
-	cancel()
-	s.wg.Wait()
-	// 成对调用：订阅的 channel 必须显式关闭，避免订阅表泄漏。
-	if bus != nil && sub != nil {
-		bus.Unsubscribe(sub)
-	}
+	// C1：停止批量落库 goroutine（排空剩余队列后再退出，幂等）。
+	s.stopPersist()
 }
 
-// Query 按 id 升序返回一页告警（可选按 mode/run_id/capture_id 过滤，见 ring.query）。
+// Query 按 id 升序返回一页告警（可选按 mode/run_id/capture_id 过滤）。
+//
+// ★ Store != nil ⇒ 查库（全量历史，不受环形缓冲容量限制）；
+//
+//	Store == nil ⇒ 退回查环形缓冲（保持现有测试与无库场景可用）。
 func (s *Service) Query(page, pageSize int, sinceID uint64, f Filter) Page {
 	if s == nil {
 		return Page{Items: []Alert{}, Page: 1, PageSize: DefaultPageSize}
 	}
+	if s.alertStore != nil {
+		return s.queryStore(page, pageSize, sinceID, f)
+	}
 	return s.ring.query(page, pageSize, sinceID, f)
+}
+
+// queryStore 走库查询（Store != nil 时 /api/alerts 的唯一路径）。
+//
+// ★ 分页语义与 ring.query 保持一致：page>=1、pageSize 默认 50 上限 500、
+// items 空时必须是 []（不是 nil）、total 为过滤后总数（不是全表行数）。
+// ★ 查库出错时记 last_error 并返回空页（HTTP 层仍 200 + 空列表，不白屏）。
+func (s *Service) queryStore(page, pageSize int, sinceID uint64, f Filter) Page {
+	page, pageSize = normalizePage(page, pageSize)
+	items, total, err := s.alertStore.QueryAlerts(context.Background(), AlertQuery{
+		Page:      page,
+		PageSize:  pageSize,
+		SinceID:   sinceID,
+		Mode:      f.Mode,
+		RunID:     f.RunID,
+		CaptureID: f.CaptureID,
+	})
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("alerting: 查库失败，返回空页", "err", err)
+		}
+		s.mu.Lock()
+		s.lastError = err.Error()
+		s.mu.Unlock()
+		return Page{Items: []Alert{}, Page: page, PageSize: pageSize, Total: 0}
+	}
+	if items == nil {
+		items = []Alert{}
+	}
+	return Page{Items: items, Page: page, PageSize: pageSize, Total: total}
+}
+
+// normalizePage 归一化分页参数（ring 与 store 两条查询路径共用同一套语义）。
+func normalizePage(page, pageSize int) (int, int) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = DefaultPageSize
+	}
+	if pageSize > MaxPageSize {
+		pageSize = MaxPageSize
+	}
+	return page, pageSize
 }
 
 // Stats 返回当前状态快照（并发安全）。
@@ -380,22 +519,44 @@ func (s *Service) Stats() Stats {
 	lastError := s.lastError
 	pushDropped := s.pushDropped
 	restored := s.restored
+	persisted := s.persisted
+	persistErrors := s.persistErrors
+	backpressure := s.backpressure
 	s.mu.Unlock()
 
 	byMode, byRun := s.ring.groupCounts()
 
+	// 待写队列积压（不含正在写的那一批）；内存模式下为 0。
+	var pending int
+	if s.persistCh != nil {
+		pending = len(s.persistCh)
+	}
+
+	// ★ 有库时 AlertsTotal 报"库里的总数"（与 /api/alerts 的 total 一致），
+	//   缓冲条数单独用 BufferTotal 报 —— 否则 stats 与列表会给出两个不同的数。
+	bufferTotal := s.ring.len()
+	alertsTotal := bufferTotal
+	if s.alertStore != nil {
+		alertsTotal = s.Query(1, 1, 0, Filter{}).Total
+	}
+
 	return Stats{
-		Enabled:      enabled,
-		AlertsTotal:  s.ring.len(),
-		Capacity:     s.ring.capacity(),
-		Received:     received,
-		Dropped:      s.ring.droppedCount(),
-		PushDropped:  pushDropped,
-		DecodeErrors: decodeErr,
-		LastError:    lastError,
-		ByMode:       byMode,
-		ByRun:        byRun,
-		Restored:     restored,
+		Enabled:             enabled,
+		AlertsTotal:         alertsTotal,
+		BufferTotal:         bufferTotal,
+		Capacity:            s.ring.capacity(),
+		Received:            received,
+		Dropped:             s.ring.droppedCount(),
+		PushDropped:         pushDropped,
+		DecodeErrors:        decodeErr,
+		LastError:           lastError,
+		ByMode:              byMode,
+		ByRun:               byRun,
+		Restored:            restored,
+		Persisted:           persisted,
+		PersistErrors:       persistErrors,
+		Pending:             pending,
+		PersistBackpressure: backpressure,
 	}
 }
 
@@ -437,6 +598,13 @@ func (s *Service) handle(ev eventbus.Event) {
 	s.mu.Lock()
 	s.received++
 	s.mu.Unlock()
+
+	// 有库：投递到待写队列（后台批量落库，回填 DB 分配的 id 后再进环形缓冲）。
+	if s.alertStore != nil {
+		s.enqueue(a)
+		return
+	}
+	// 无库：保持旧行为（内存自增 id + 立即进环形缓冲）。
 	rec := s.ring.add(a)
 	s.push(rec)
 }
@@ -510,5 +678,186 @@ func (s *Service) recordDecodeError(err error) {
 
 	if s.logger != nil {
 		s.logger.Warn("alerting: 丢弃无法解析的事件", "err", msg)
+	}
+}
+
+// —— 任务 C1：批量落库 ——
+//
+// 设计要点：
+//   - 待写队列是有界通道（persistQueueSize），满时 enqueue 阻塞 ⇒ 反压到消费循环，
+//     宁可慢、不可丢，并计入 persist_backpressure；
+//   - 后台 persistLoop 攒批：满 flushBatchSize 条或距首条满 flushInterval（先到者）刷一次；
+//   - 写入失败：记日志 + 该批留在本地重试（store.InsertAlerts 是单条原子 INSERT，
+//     失败即一行未插入，故重试不会重复），每次失败累计 persist_errors；
+//   - 成功：把 DB 返回的 id 回填到 Alert，再进环形缓冲 + 派发，persisted 累加。
+//
+// ★ 为什么以 DB 的 BIGSERIAL 为唯一 ID：内存与库必须共用同一个 id，否则前端
+//
+//      since_id 增量拉取会错乱。故先落库、拿到 id、回填、再进环形缓冲。
+
+// startPersist 启动后台批量落库 goroutine（仅 alertStore != nil 时调用）。
+func (s *Service) startPersist() {
+	s.persistCh = make(chan Alert, persistQueueSize)
+	s.persistQuit = make(chan struct{})
+	s.persistWG.Add(1)
+	go s.persistLoop()
+}
+
+// stopPersist 通知批量落库 goroutine 排空剩余队列并退出（幂等）。
+func (s *Service) stopPersist() {
+	if s.persistQuit == nil {
+		return
+	}
+	s.persistStopOnce.Do(func() { close(s.persistQuit) })
+	s.persistWG.Wait()
+}
+
+// enqueue 把一条告警投递到待写队列。
+//
+// ★ 队列满时阻塞（反压到事件消费循环），并累计 backpressure 便于观测。
+func (s *Service) enqueue(a Alert) {
+	select {
+	case s.persistCh <- a:
+		return
+	default:
+	}
+	s.mu.Lock()
+	s.backpressure++
+	s.mu.Unlock()
+	s.persistCh <- a
+}
+
+// persistLoop 后台攒批 + 批量落库。
+func (s *Service) persistLoop() {
+	defer s.persistWG.Done()
+
+	batch := make([]Alert, 0, flushBatchSize)
+	timer := time.NewTimer(flushInterval)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
+
+	for {
+		// 阻塞等待首条（或退出信号）。
+		select {
+		case a := <-s.persistCh:
+			batch = append(batch, a)
+		case <-s.persistQuit:
+			s.drainAndFlush(batch)
+			return
+		}
+
+		// 满批立即刷，否则最多等 flushInterval 攒更多。
+		if len(batch) >= flushBatchSize {
+			s.flushBatch(&batch, 0)
+			continue
+		}
+
+		timer.Reset(flushInterval)
+	gather:
+		for len(batch) < flushBatchSize {
+			select {
+			case a := <-s.persistCh:
+				batch = append(batch, a)
+			case <-timer.C:
+				break gather
+			case <-s.persistQuit:
+				stopTimer(timer)
+				s.drainAndFlush(batch)
+				return
+			}
+		}
+		stopTimer(timer)
+		s.flushBatch(&batch, 0)
+	}
+}
+
+// drainAndFlush 在退出前排空待写队列并尽量落库（限次重试，避免关停时永久卡住）。
+func (s *Service) drainAndFlush(batch []Alert) {
+	// 在关停路径上给重试设上限：DB 已彻底不可用时宁可放弃也不永久卡死。
+	const shutdownRetries = 5
+	for {
+		select {
+		case a := <-s.persistCh:
+			batch = append(batch, a)
+			if len(batch) >= flushBatchSize {
+				s.flushBatch(&batch, shutdownRetries)
+			}
+		default:
+			if len(batch) > 0 {
+				s.flushBatch(&batch, shutdownRetries)
+			}
+			return
+		}
+	}
+}
+
+// flushBatch 把一批告警写入库；失败则重试（maxAttempts<=0 表示不限次数）。
+//
+// ★ 成功时：回填 DB id → 进环形缓冲 → 派发，保证内存与库的 id 完全一致。
+// ★ 失败时：整批原样保留重试（InsertAlerts 为原子写入，不会重复插入）。
+func (s *Service) flushBatch(batch *[]Alert, maxAttempts int) {
+	items := *batch
+	if len(items) == 0 {
+		return
+	}
+
+	attempts := 0
+	for {
+		ids, err := s.alertStore.InsertAlerts(context.Background(), items)
+		if err == nil {
+			s.recordPersisted(items, ids)
+			*batch = items[:0]
+			return
+		}
+
+		s.mu.Lock()
+		s.persistErrors++
+		s.mu.Unlock()
+		if s.logger != nil {
+			s.logger.Warn("alerting: 批量入库失败，重试中", "count", len(items), "err", err)
+		}
+		attempts++
+		if maxAttempts > 0 && attempts >= maxAttempts {
+			if s.logger != nil {
+				s.logger.Error("alerting: 批量入库连续失败，放弃该批（关停中）",
+					"count", len(items), "err", err)
+			}
+			*batch = items[:0]
+			return
+		}
+		time.Sleep(persistRetryDelay)
+	}
+}
+
+// recordPersisted 回填 DB id 并把该批告警放进环形缓冲 + 派发。
+func (s *Service) recordPersisted(items []Alert, ids []uint64) {
+	if len(ids) != len(items) {
+		// 理论上不会发生（单条 INSERT ... RETURNING 一一对应）；防御性记录。
+		if s.logger != nil {
+			s.logger.Error("alerting: 入库返回的 id 数量与告警数量不一致",
+				"alerts", len(items), "ids", len(ids))
+		}
+	}
+	for i := range items {
+		if i < len(ids) {
+			items[i].ID = ids[i]
+		}
+		rec := s.ring.addWithID(items[i])
+		s.push(rec)
+	}
+	s.mu.Lock()
+	s.persisted += uint64(len(items))
+	s.mu.Unlock()
+}
+
+// stopTimer 安全停止并清空一次 timer（避免残留 tick 影响下一轮）。
+func stopTimer(t *time.Timer) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
 	}
 }

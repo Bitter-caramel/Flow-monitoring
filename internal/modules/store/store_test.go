@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"flow-monitoring/internal/kernel/alerting"
 	"flow-monitoring/internal/kernel/storage"
 	"flow-monitoring/pkg/plugin"
 )
@@ -395,5 +396,149 @@ func TestPostgres_RunSaveList_Integration(t *testing.T) {
 	}
 	if idxA < 0 || idxB < 0 || idxB >= idxA {
 		t.Errorf("RunList 未按 started DESC 排序: idxA=%d idxB=%d list=%+v", idxA, idxB, gotAll)
+	}
+}
+
+// TestPostgres_Alerts_Integration 是 C1「告警全量入库」的真库测试。
+//
+// 覆盖：
+//   - InsertAlerts 的 INSERT ... RETURNING（id 递增、按输入顺序返回）；
+//   - QueryAlerts 的分页（total 为过滤后条数、items 按 id 升序）；
+//   - since_id 增量；
+//   - 按 mode / run_id / capture_id 过滤；
+//   - 空结果 items 为非 nil 空切片。
+//
+// 通过 FLOW_TEST_PG_DSN 提供连接串时运行，否则跳过（与其它集成测试同一约定）。
+func TestPostgres_Alerts_Integration(t *testing.T) {
+	dsn := testDSN()
+	if dsn == "" {
+		t.Skip("FLOW_TEST_PG_DSN 未设置，跳过 PostgreSQL 集成测试")
+	}
+
+	ctx := context.Background()
+	pg, err := New(ctx, dsn, 5)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer pg.Close()
+	if err := pg.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	// 每次运行用唯一 run_id/capture_id，避免与其它测试残留互相干扰。
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	runID := "it-alert-run-" + suffix
+	capA := "it-alert-cap-a-" + suffix
+	capB := "it-alert-cap-b-" + suffix
+
+	defer func() {
+		_, _ = pg.pool.Exec(context.Background(), `DELETE FROM alerts WHERE run_id = $1`, runID)
+	}()
+
+	base := time.Date(2024, 7, 1, 12, 0, 0, 0, time.UTC)
+	inputs := []alerting.Alert{
+		{
+			RuleID: "rule-a", Name: "A", Severity: "high", Weight: 80,
+			Time: base.Format(time.RFC3339), SrcIP: "10.0.0.1", SrcPort: 1111,
+			DstIP: "10.0.0.2", DstPort: 80, Proto: "TCP", StreamID: 1, PktNo: 1,
+			Buffer: "payload", Offset: 3, Snippet: "x",
+			RunID: runID, Mode: alerting.ModeLive, CaptureID: capA,
+		},
+		{
+			RuleID: "rule-b", Name: "B", Severity: "medium", Weight: 40,
+			Time: base.Add(time.Second).Format(time.RFC3339), SrcIP: "10.0.0.3", SrcPort: 2222,
+			DstIP: "10.0.0.4", DstPort: 443, Proto: "TLSv1.2", StreamID: 2, PktNo: 2,
+			Buffer: "payload", Offset: 7, Snippet: "y",
+			RunID: runID, Mode: alerting.ModeStatic, CaptureID: capB,
+		},
+		{
+			RuleID: "rule-c", Name: "C", Severity: "low", Weight: 10,
+			Time: base.Add(2 * time.Second).Format(time.RFC3339), SrcIP: "10.0.0.5", SrcPort: 3333,
+			DstIP: "10.0.0.6", DstPort: 53, Proto: "DNS", StreamID: 3, PktNo: 3,
+			Buffer: "payload", Offset: 0, Snippet: "z",
+			RunID: runID, Mode: alerting.ModeLive, CaptureID: capB,
+		},
+	}
+
+	// ① INSERT ... RETURNING：按输入顺序返回 id 且严格递增。
+	ids, err := pg.InsertAlerts(ctx, inputs)
+	if err != nil {
+		t.Fatalf("InsertAlerts: %v", err)
+	}
+	if len(ids) != len(inputs) {
+		t.Fatalf("返回 id 数量 = %d, want %d", len(ids), len(inputs))
+	}
+	for i := 1; i < len(ids); i++ {
+		if ids[i] <= ids[i-1] {
+			t.Fatalf("id 未严格递增: %v", ids)
+		}
+	}
+
+	// ② 分页：page=1 size=2 ⇒ 2 条，total 为过滤后总数 3（不是全表行数）。
+	items, total, err := pg.QueryAlerts(ctx, alerting.AlertQuery{Page: 1, PageSize: 2, RunID: runID})
+	if err != nil {
+		t.Fatalf("QueryAlerts page1: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("total = %d, want 3（过滤后总数）", total)
+	}
+	if len(items) != 2 || items[0].ID != ids[0] || items[1].ID != ids[1] {
+		t.Fatalf("page1 items = %+v, want ids [%d %d]", items, ids[0], ids[1])
+	}
+	// 字段 round-trip（含 "offset" 保留字、端口、模式、时间）。
+	if items[0].RuleID != "rule-a" || items[0].SrcPort != 1111 || items[0].Offset != 3 ||
+		items[0].Mode != alerting.ModeLive || items[0].CaptureID != capA {
+		t.Errorf("items[0] 字段 round-trip 错误: %+v", items[0])
+	}
+	if items[0].Time != base.Format(time.RFC3339) {
+		t.Errorf("items[0].Time = %q, want %q", items[0].Time, base.Format(time.RFC3339))
+	}
+
+	// ③ 第二页：只剩 1 条（ids[2]）。
+	items2, total2, err := pg.QueryAlerts(ctx, alerting.AlertQuery{Page: 2, PageSize: 2, RunID: runID})
+	if err != nil {
+		t.Fatalf("QueryAlerts page2: %v", err)
+	}
+	if total2 != 3 || len(items2) != 1 || items2[0].ID != ids[2] {
+		t.Fatalf("page2 total=%d items=%+v, want total=3 单条 id=%d", total2, items2, ids[2])
+	}
+
+	// ④ since_id：id > ids[0] ⇒ 2 条（ids[1], ids[2]）。
+	items3, total3, err := pg.QueryAlerts(ctx, alerting.AlertQuery{Page: 1, PageSize: 10, SinceID: ids[0], RunID: runID})
+	if err != nil {
+		t.Fatalf("QueryAlerts since_id: %v", err)
+	}
+	if total3 != 2 || len(items3) != 2 || items3[0].ID != ids[1] || items3[1].ID != ids[2] {
+		t.Fatalf("since_id 增量错误: total=%d items=%+v", total3, items3)
+	}
+
+	// ⑤ 按 mode 过滤（叠加唯一 run 隔离）：static ⇒ 仅 rule-b。
+	itemsM, totalM, err := pg.QueryAlerts(ctx, alerting.AlertQuery{
+		Page: 1, PageSize: 10, RunID: runID, Mode: alerting.ModeStatic})
+	if err != nil {
+		t.Fatalf("QueryAlerts mode: %v", err)
+	}
+	if totalM != 1 || len(itemsM) != 1 || itemsM[0].ID != ids[1] {
+		t.Fatalf("mode 过滤错误: total=%d items=%+v", totalM, itemsM)
+	}
+
+	// ⑥ 按 capture_id 过滤（叠加唯一 run 隔离）：capB ⇒ rule-b + rule-c（2 条）。
+	itemsC, totalC, err := pg.QueryAlerts(ctx, alerting.AlertQuery{
+		Page: 1, PageSize: 10, RunID: runID, CaptureID: capB})
+	if err != nil {
+		t.Fatalf("QueryAlerts capture: %v", err)
+	}
+	if totalC != 2 || len(itemsC) != 2 || itemsC[0].ID != ids[1] || itemsC[1].ID != ids[2] {
+		t.Fatalf("capture_id 过滤错误: total=%d items=%+v", totalC, itemsC)
+	}
+
+	// ⑦ 空结果：items 必须是 non-nil 空切片，total 0。
+	itemsNone, totalNone, err := pg.QueryAlerts(ctx, alerting.AlertQuery{
+		Page: 1, PageSize: 10, RunID: "no-such-run-" + suffix})
+	if err != nil {
+		t.Fatalf("QueryAlerts 空结果: %v", err)
+	}
+	if totalNone != 0 || itemsNone == nil || len(itemsNone) != 0 {
+		t.Fatalf("空结果异常: total=%d items=%#v（items 必须是 [] 不是 null）", totalNone, itemsNone)
 	}
 }
