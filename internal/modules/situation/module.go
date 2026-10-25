@@ -44,7 +44,7 @@ type situationSettings struct {
 //
 // 生命周期：
 //
-//	MakeHandler → 固定宿主桥并暴露 GET /api/situation[/stats]；
+//	MakeHandler → 固定宿主桥并暴露 GET /api/situation 与 /api/situation/stats；
 //	OnStart     → 解析配置、启动 pollsource 消费 detect.feature（起 goroutine 后立即返回）；
 //	OnStop      → 关 source、等消费 goroutine 退出（幂等）；
 //	OnHealth    → 报 tracked_ips / received / decode_errors / level_changes / top_score。
